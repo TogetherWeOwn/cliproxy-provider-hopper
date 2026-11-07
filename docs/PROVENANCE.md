@@ -1,34 +1,12 @@
-# Protocol and parser provenance
+# Provenance
 
-The quota parser and its original shape tests are adapted from the MIT-licensed
-[TogetherWeOwn/cpa-plugin-subscription-pool](https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool)
-commit `ad3cb9ecd0130b1b7a0ffb122d0d4685bd8e659b`, specifically
-`internal/providers/synthetic/quota.go`. The failure classification is based on
-response handling in that commit's `internal/providers/synthetic/module.go`.
-The MIT license is included at the repository root and in release archives.
+This plugin is a port of the MIT-licensed
+[TogetherWeOwn/cliproxy-provider-synthetic](https://github.com/TogetherWeOwn/cliproxy-provider-synthetic)
+v0.2.3. The auth, model and executor wiring keep that plugin's structure; the
+Synthetic quota shapes and the Infinite stream aggregator were removed.
 
-That implementation's provenance cites Synthetic's MIT-licensed
-[Octofriend quota utility](https://github.com/synthetic-lab/octofriend/blob/main/source/utils/quota.ts)
-and
-[OpenAI error adapter](https://github.com/synthetic-lab/octofriend/blob/main/source/libocto/compilers/openai-shared.ts)
-as behavioral references; it states that no Octofriend code was copied. This
-provider's new C-ABI/auth/model/executor wiring and SSE aggregator use the
-published provider kit and the pinned CLIProxy SDK, not an additional routing
-engine.
-
-Published sources establish the Bearer authorization, OpenAI endpoint, Infinite
-streaming requirement and quota/header shapes. They do not establish guaranteed
-per-tier numeric limits, concurrency allowances or exact exhaustion error
-contracts for all accounts. Those remain pending live verification; historical
-fixtures are not current entitlement guarantees.
-
-The native behavior references are CLIProxyAPI v8.0.49:
-
-- `sdk/pluginabi/types.go`: ABI/RPC envelopes and retry timing.
-- `internal/pluginhost/rpc_client.go`: RPC-to-host error adaptation.
-- `sdk/cliproxy/auth/conductor_cooldown.go`: native cooldown state.
-- `internal/pluginhost/adapters_executors.go`: executor registration/ownership.
-- `internal/pluginstore/registry.go` and `github.go`: registry/release assets.
-
-See the README for the verified RPC transient-marker limitation and
-`integration/hostcompat/compat_test.go` for its executable characterization.
+The Hopper request, model, usage and header shapes come from live responses of
+the public Hopper API observed on 2026-11-07 (`/v1/models`, `/v1/chat/completions`,
+`/v1/usage`). Hopper publishes no rate-limit body format; the 429 concurrency
+classification is a conservative heuristic that never downgrades an exhausted
+window.

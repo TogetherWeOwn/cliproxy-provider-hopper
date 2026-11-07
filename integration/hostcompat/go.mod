@@ -1,6 +1,6 @@
 // The host loader is internal. This test-only module is intentionally within
 // its import namespace; it consumes the original pinned module without a fork.
-module github.com/router-for-me/CLIProxyAPI/v8/syntheticcompat
+module github.com/router-for-me/CLIProxyAPI/v8/hoppercompat
 
 go 1.26.10
 

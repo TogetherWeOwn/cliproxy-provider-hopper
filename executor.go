@@ -22,41 +22,20 @@ type executor struct {
 func newExecutor(q *quotaProvider) executor {
 	return executor{Passthrough: kit.Passthrough{Provider: provider, BuildRequest: buildRequest, PrepareHTTP: prepareHTTP, ClassifyError: classifyResponse}, quota: q}
 }
+
+// forAuth lets a 429 without usage headers borrow the last observed windows
+// for its RetryAfter hint.
 func (e executor) forAuth(id string) kit.Passthrough {
 	p := e.Passthrough
 	p.ClassifyError = func(resp pluginapi.HTTPResponse) error {
-		return classifyWithQuota(resp, time.Now(), e.quota.latestOne(id))
+		return classifyWithQuota(resp, time.Now(), e.quota.latest(id))
 	}
 	return p
 }
 
 func (e executor) Execute(ctx context.Context, r pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
-	// Execute is non-streaming regardless of an inconsistent payload stream flag.
-	var input struct{ Model string }
-	_ = json.Unmarshal(r.Payload, &input)
-	if !strings.HasPrefix(input.Model, modelPrefix+"infinite:") {
-		return e.forAuth(r.AuthID).Execute(ctx, r)
-	}
-	streamCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	r.Stream = true
-	stream, err := e.forAuth(r.AuthID).ExecuteStream(streamCtx, r)
-	if err != nil {
-		return pluginapi.ExecutorResponse{}, err
-	}
-	payload, err := aggregateSSE(streamCtx, stream.Chunks)
-	if err != nil {
-		return pluginapi.ExecutorResponse{}, err
-	}
-	headers := stream.Headers.Clone()
-	if headers == nil {
-		headers = make(http.Header)
-	}
-	headers.Set("Content-Type", "application/json")
-	for _, h := range []string{"Content-Length", "Content-Encoding", "Transfer-Encoding"} {
-		headers.Del(h)
-	}
-	return pluginapi.ExecutorResponse{Payload: payload, Headers: headers}, nil
+	r.Stream = false
+	return e.forAuth(r.AuthID).Execute(ctx, r)
 }
 
 func (e executor) ExecuteStream(ctx context.Context, r pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
@@ -65,18 +44,6 @@ func (e executor) ExecuteStream(ctx context.Context, r pluginapi.ExecutorRequest
 }
 
 func (e executor) HttpRequest(ctx context.Context, r pluginapi.ExecutorHTTPRequest) (pluginapi.ExecutorHTTPResponse, error) {
-	var mode struct {
-		Model  string
-		Stream bool
-	}
-	_ = json.Unmarshal(r.Body, &mode)
-	if strings.HasPrefix(mode.Model, modelPrefix+"infinite:") && !mode.Stream {
-		out, err := e.Execute(ctx, pluginapi.ExecutorRequest{AuthID: r.AuthID, Payload: r.Body, StorageJSON: r.StorageJSON, AuthMetadata: r.Metadata, HTTPClient: r.HTTPClient})
-		if err != nil {
-			return pluginapi.ExecutorHTTPResponse{}, err
-		}
-		return pluginapi.ExecutorHTTPResponse{StatusCode: http.StatusOK, Headers: out.Headers, Body: out.Payload}, nil
-	}
 	return e.forAuth(r.AuthID).HttpRequest(ctx, r)
 }
 
@@ -91,18 +58,17 @@ func buildRequest(_ context.Context, r pluginapi.ExecutorRequest) (pluginapi.HTT
 	}
 	var model string
 	if json.Unmarshal(body["model"], &model) != nil || !strings.HasPrefix(model, modelPrefix) || len(model) == len(modelPrefix) {
-		return pluginapi.HTTPRequest{}, &pluginabi.Error{Code: "invalid_model", Message: "expected a synthetic/ model", HTTPStatus: 400}
+		return pluginapi.HTTPRequest{}, &pluginabi.Error{Code: "invalid_model", Message: "expected a hopper/ model", HTTPStatus: 400}
 	}
-	model = strings.TrimPrefix(model, modelPrefix)
-	body["model"], _ = json.Marshal(model)
-	if r.Stream || strings.HasPrefix(model, "infinite:") {
+	body["model"], _ = json.Marshal(strings.TrimPrefix(model, modelPrefix))
+	if r.Stream {
 		body["stream"] = json.RawMessage("true")
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return pluginapi.HTTPRequest{}, err
 	}
-	return pluginapi.HTTPRequest{Method: http.MethodPost, URL: selectedBase(upstreamBase) + "/openai/v1/chat/completions", Headers: http.Header{"Authorization": {"Bearer " + key}, "Content-Type": {"application/json"}}, Body: raw}, nil
+	return pluginapi.HTTPRequest{Method: http.MethodPost, URL: selectedBase(upstreamBase) + "/v1/chat/completions", Headers: http.Header{"Authorization": {"Bearer " + key}, "Content-Type": {"application/json"}}, Body: raw}, nil
 }
 
 func prepareHTTP(ctx context.Context, r pluginapi.ExecutorHTTPRequest) (pluginapi.HTTPRequest, error) {

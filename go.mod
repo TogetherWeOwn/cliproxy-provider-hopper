@@ -1,4 +1,4 @@
-module github.com/TogetherWeOwn/cliproxy-provider-synthetic
+module github.com/TogetherWeOwn/cliproxy-provider-hopper
 
 go 1.26.10
 

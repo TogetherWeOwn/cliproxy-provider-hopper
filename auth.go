@@ -32,20 +32,11 @@ func newAuthProviderWithLoginTTL(loginTTL time.Duration) (*authProvider, error) 
 		if _, ok := m["id"]; ok {
 			return &pluginabi.Error{Code: "invalid_auth", Message: "auth identity is derived from the API key", HTTPStatus: 400}
 		}
-		if p, ok := m["plan"]; ok && p != "go" && p != "standard" && p != "big" {
-			return &pluginabi.Error{Code: "invalid_auth", Message: "plan must be go, standard or big", HTTPStatus: 400}
-		}
 		return nil
 	}}}
-	// The login page offers the optional plan field; Parse is the full
-	// ParseAuth pipeline below, including the duplicate-key guard, so a
-	// submitted key faces the same checks as an uploaded auth file. Plan is
-	// neither secret nor part of the credential identity (identity is the
-	// API key alone), so the field needs neither kit's Secret hidden input
-	// nor a FilenameFields entry.
-	login, err := kit.NewAPIKeyLogin(kit.APIKeyLoginConfig{Provider: provider, Parse: p.ParseAuth, SessionTTL: loginTTL, Fields: []kit.APIKeyLoginField{
-		{Name: "plan", Label: "Plan", Description: "Synthetic plan: go, standard or big. Leave blank to skip.", Required: false},
-	}})
+	// Parse is the full ParseAuth pipeline below, including the duplicate-key
+	// guard, so a submitted key faces the same checks as an uploaded auth file.
+	login, err := kit.NewAPIKeyLogin(kit.APIKeyLoginConfig{Provider: provider, Parse: p.ParseAuth, SessionTTL: loginTTL})
 	if err != nil {
 		return nil, err
 	}

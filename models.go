@@ -13,8 +13,9 @@ import (
 
 type catalog struct{}
 
+// fallbackModels are the chat models Hopper listed for a Pro key on 2026-11-07.
 func fallbackModels() []pluginapi.ModelInfo {
-	ids := []string{"syn:large:text", "syn:small:text", "syn:large:vision", "syn:small:vision", "infinite:small:vision"}
+	ids := []string{"deepseek-v4.1-flash", "deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017-abliterated"}
 	out := make([]pluginapi.ModelInfo, 0, len(ids))
 	for _, id := range ids {
 		out = append(out, pluginapi.ModelInfo{ID: modelPrefix + id, Object: "model", OwnedBy: provider, DisplayName: id})
@@ -35,7 +36,7 @@ func (catalog) ModelsForAuth(ctx context.Context, r pluginapi.AuthModelRequest) 
 	if r.HTTPClient == nil {
 		return pluginapi.ModelResponse{}, &pluginabi.Error{Code: "host_unavailable", Message: "model discovery requires the host HTTP client", HTTPStatus: 503}
 	}
-	resp, err := r.HTTPClient.Do(ctx, pluginapi.HTTPRequest{Method: http.MethodGet, URL: selectedBase(upstreamBase) + "/openai/v1/models", Headers: http.Header{"Authorization": {"Bearer " + key}, "Accept": {"application/json"}}})
+	resp, err := r.HTTPClient.Do(ctx, pluginapi.HTTPRequest{Method: http.MethodGet, URL: selectedBase(upstreamBase) + "/v1/models", Headers: http.Header{"Authorization": {"Bearer " + key}, "Accept": {"application/json"}}})
 	if err != nil {
 		return pluginapi.ModelResponse{}, err
 	}
@@ -48,15 +49,15 @@ func (catalog) ModelsForAuth(ctx context.Context, r pluginapi.AuthModelRequest) 
 		}
 	}
 	if len(resp.Body) > maxQuotaResponse || json.Unmarshal(resp.Body, &wire) != nil || wire.Data == nil {
-		return pluginapi.ModelResponse{}, &pluginabi.Error{Code: "invalid_models", Message: "Synthetic returned an invalid model catalog", HTTPStatus: 502}
+		return pluginapi.ModelResponse{}, &pluginabi.Error{Code: "invalid_models", Message: "Hopper returned an invalid model catalog", HTTPStatus: 502}
 	}
 	out := pluginapi.ModelResponse{Provider: provider}
 	seen := make(map[string]bool)
 	for _, model := range wire.Data {
 		id := strings.TrimSpace(model.ID)
-		// The v1 executor implements chat, not embeddings. Only recognized Synthetic
-		// namespaces are accepted; aliases and pinned IDs remain upstream-owned.
-		if id == "" || strings.Contains(strings.ToLower(id), "embed") || !(strings.HasPrefix(id, "syn:") || strings.HasPrefix(id, "infinite:") || strings.HasPrefix(id, "hf:")) || seen[id] {
+		// The executor implements chat, not embeddings; the catalog is per key,
+		// so entitlement-gated models appear only for keys that can use them.
+		if id == "" || strings.Contains(strings.ToLower(id), "embed") || strings.HasPrefix(id, modelPrefix) || seen[id] {
 			continue
 		}
 		seen[id] = true

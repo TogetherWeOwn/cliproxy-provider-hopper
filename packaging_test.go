@@ -21,7 +21,7 @@ func TestReleaseArchiveAndChecksums(t *testing.T) {
 	if result, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("package: %v\n%s", err, result)
 	}
-	archive := filepath.Join(out, "synthetic_0.2.3_linux_amd64.zip")
+	archive := filepath.Join(out, "hopper_0.1.0_linux_amd64.zip")
 	raw, err := os.ReadFile(archive)
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +31,7 @@ func TestReleaseArchiveAndChecksums(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(checksums), hex.EncodeToString(sum[:])+"  synthetic_0.2.3_linux_amd64.zip") {
+	if !strings.Contains(string(checksums), hex.EncodeToString(sum[:])+"  hopper_0.1.0_linux_amd64.zip") {
 		t.Fatalf("incorrect checksums %s", checksums)
 	}
 	reader, err := zip.OpenReader(archive)
@@ -41,7 +41,7 @@ func TestReleaseArchiveAndChecksums(t *testing.T) {
 	defer reader.Close()
 	found := false
 	for _, f := range reader.File {
-		if f.Name == "synthetic.so" && f.UncompressedSize64 > 0 {
+		if f.Name == "hopper.so" && f.UncompressedSize64 > 0 {
 			found = true
 		}
 		if strings.Contains(f.Name, "/") || strings.HasSuffix(f.Name, ".h") {
@@ -49,6 +49,6 @@ func TestReleaseArchiveAndChecksums(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("archive lacks synthetic.so")
+		t.Fatal("archive lacks hopper.so")
 	}
 }

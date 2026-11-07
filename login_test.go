@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"html"
 	"strings"
 	"testing"
 	"time"
@@ -13,13 +12,13 @@ import (
 )
 
 const (
-	testResourceBase = "/v0/resource/plugins/synthetic-id"
-	testSubmitPath   = "/v0/management/plugin-login/synthetic"
+	testResourceBase = "/v0/resource/plugins/hopper-id"
+	testSubmitPath   = "/v0/management/plugin-login/hopper"
 	testBaseURL      = "http://127.0.0.1:19000/v0/management/oauth-callback"
 )
 
 // TestAPIKeyLoginWired drives the management-UI login flow end to end through
-// the provider's own ParseAuth pipeline: page, key+plan submit, poll.
+// the provider's own ParseAuth pipeline: page, key submit, poll.
 func TestAPIKeyLoginWired(t *testing.T) {
 	ctx := context.Background()
 	p, err := newAuthProvider()
@@ -37,7 +36,7 @@ func TestAPIKeyLoginWired(t *testing.T) {
 	}
 	var sawSubmit, sawPage bool
 	for _, r := range reg.Routes {
-		if r.Method == "POST" && r.Path == "plugin-login/synthetic" {
+		if r.Method == "POST" && r.Path == "plugin-login/hopper" {
 			sawSubmit = true
 		}
 	}
@@ -49,8 +48,8 @@ func TestAPIKeyLoginWired(t *testing.T) {
 	if !sawSubmit || !sawPage {
 		t.Fatalf("login routes not registered: %+v", reg)
 	}
-	start, err := p.StartLogin(ctx, pluginapi.AuthLoginStartRequest{Provider: "synthetic",
-		BaseURL: testBaseURL, Host: pluginapi.HostConfigSummary{AuthDir: "/tmp/synthetic-auth"}})
+	start, err := p.StartLogin(ctx, pluginapi.AuthLoginStartRequest{Provider: "hopper",
+		BaseURL: testBaseURL, Host: pluginapi.HostConfigSummary{AuthDir: "/tmp/hopper-auth"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,15 +65,9 @@ func TestAPIKeyLoginWired(t *testing.T) {
 	if err != nil || page.StatusCode != 200 {
 		t.Fatalf("login page %+v %v", page, err)
 	}
-	body := html.UnescapeString(string(page.Body))
-	for _, want := range []string{"read -r PLUGIN_FIELD_PLAN", `"plan":"$ESC_FIELD_PLAN"`, "Plan (optional)"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("page missing plan wiring %q", want)
-		}
-	}
 	submit, err := login.HandleManagement(ctx, pluginapi.ManagementRequest{Method: "POST",
 		Path: testSubmitPath,
-		Body: []byte(`{"state":"` + start.State + `","api_key":"example-key","plan":"big"}`)})
+		Body: []byte(`{"state":"` + start.State + `","api_key":"example-key"}`)})
 	if err != nil || submit.StatusCode != 200 {
 		t.Fatalf("submit %+v %v", submit, err)
 	}
@@ -86,44 +79,13 @@ func TestAPIKeyLoginWired(t *testing.T) {
 	if err := json.Unmarshal(done.Auth.StorageJSON, &store); err != nil {
 		t.Fatal(err)
 	}
-	if done.Auth.Provider != "synthetic" || store["plan"] != "big" {
-		t.Fatalf("plan lost through login: %+v %s", done.Auth, done.Auth.StorageJSON)
+	if done.Auth.Provider != "hopper" || store["api_key"] != "example-key" {
+		t.Fatalf("key lost through login: %+v %s", done.Auth, done.Auth.StorageJSON)
 	}
 	// A second poll must not redeliver credentials.
 	again, err := p.PollLogin(ctx, pluginapi.AuthLoginPollRequest{State: start.State})
 	if err != nil || again.Status != pluginapi.AuthLoginStatusPending {
 		t.Fatalf("consumed login redelivered: %+v %v", again, err)
-	}
-}
-
-// TestAPIKeyLoginRejectsBadPlan submits an invalid plan through the login
-// endpoint and expects the provider's own validation to reject it.
-func TestAPIKeyLoginRejectsBadPlan(t *testing.T) {
-	ctx := context.Background()
-	p, err := newAuthProvider()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := p.Login.RegisterManagement(ctx, pluginapi.ManagementRegistrationRequest{
-		BasePath: "/v0/management", ResourceBasePath: testResourceBase}); err != nil {
-		t.Fatal(err)
-	}
-	start, err := p.StartLogin(ctx, pluginapi.AuthLoginStartRequest{Provider: "synthetic",
-		BaseURL: testBaseURL, Host: pluginapi.HostConfigSummary{AuthDir: "/tmp/synthetic-auth"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	submit, err := p.Login.HandleManagement(ctx, pluginapi.ManagementRequest{Method: "POST",
-		Path: testSubmitPath,
-		Body: []byte(`{"state":"` + start.State + `","api_key":"example-key","plan":"unlimited"}`)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if submit.StatusCode != 400 || !strings.Contains(string(submit.Body), "plan must be") {
-		t.Fatalf("bad plan accepted: %+v", submit)
-	}
-	if strings.Contains(string(submit.Body), "example-key") {
-		t.Fatalf("rejection echoed the key: %s", submit.Body)
 	}
 }
 
@@ -143,8 +105,8 @@ func TestLoginAbandonedReleasesOwnership(t *testing.T) {
 		BasePath: "/v0/management", ResourceBasePath: testResourceBase}); err != nil {
 		t.Fatal(err)
 	}
-	start, err := p.StartLogin(ctx, pluginapi.AuthLoginStartRequest{Provider: "synthetic",
-		BaseURL: testBaseURL, Host: pluginapi.HostConfigSummary{AuthDir: "/tmp/synthetic-auth"}})
+	start, err := p.StartLogin(ctx, pluginapi.AuthLoginStartRequest{Provider: "hopper",
+		BaseURL: testBaseURL, Host: pluginapi.HostConfigSummary{AuthDir: "/tmp/hopper-auth"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,8 +118,8 @@ func TestLoginAbandonedReleasesOwnership(t *testing.T) {
 	}
 	// The login is abandoned here: it is never polled.
 	upload := func(file string) error {
-		_, err := p.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: file,
-			RawJSON: []byte(`{"type":"synthetic","api_key":"abandoned-key"}`)})
+		_, err := p.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "hopper", FileName: file,
+			RawJSON: []byte(`{"type":"hopper","api_key":"abandoned-key"}`)})
 		return err
 	}
 	// While the login is still in flight its reservation blocks other files.

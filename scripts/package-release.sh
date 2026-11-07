@@ -11,15 +11,15 @@ mkdir -p -- "$output"
 output=$(cd -- "$output" && pwd)
 cache=${XDG_CACHE_HOME:-"$HOME/.cache"}
 mkdir -p -- "$cache"
-scratch=$(mktemp -d "$cache/synthetic-release.XXXXXX")
+scratch=$(mktemp -d "$cache/hopper-release.XXXXXX")
 trap 'rm -rf -- "$scratch"' EXIT
 
-CGO_ENABLED=1 GOOS=linux GOARCH=amd64 "$go_bin" -C "$root" build -trimpath -buildmode=c-shared -o "$scratch/synthetic.so" .
-nm -D "$scratch/synthetic.so" > "$scratch/symbols.txt"
+CGO_ENABLED=1 GOOS=linux GOARCH=amd64 "$go_bin" -C "$root" build -trimpath -buildmode=c-shared -o "$scratch/hopper.so" .
+nm -D "$scratch/hopper.so" > "$scratch/symbols.txt"
 grep -q ' T cliproxy_plugin_init$' "$scratch/symbols.txt"
-archive="synthetic_${version}_linux_amd64.zip"
+archive="hopper_${version}_linux_amd64.zip"
 # Exclude generated C headers and any credential/config files from the archive.
-zip -q -X -j "$scratch/$archive" "$scratch/synthetic.so" "$root/LICENSE"
+zip -q -X -j "$scratch/$archive" "$scratch/hopper.so" "$root/LICENSE"
 (cd -- "$scratch" && sha256sum "$archive") > "$scratch/checksums.txt"
 cp -- "$scratch/$archive" "$scratch/checksums.txt" "$output/"
 printf 'Created %s and checksums.txt\n' "$archive"

@@ -19,7 +19,7 @@ func TestQuotaPollUsesAuthOrHostProxy(t *testing.T) {
 			mu.Lock()
 			seen = append(seen, r.URL.String())
 			mu.Unlock()
-			fmt.Fprint(w, `{"planWeeklyLimit":{"percentRemaining":40}}`)
+			fmt.Fprint(w, `{"windows":{"weekly":{"used_usd":1,"limit_usd":40}}}`)
 		}))
 		t.Cleanup(s.Close)
 		return s, func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), seen...) }
@@ -28,7 +28,7 @@ func TestQuotaPollUsesAuthOrHostProxy(t *testing.T) {
 	hostProxy, hostSeen := recorder()
 	client := newQuotaHTTPClient()
 	defer client.CloseIdleConnections()
-	q := newQuotaProvider("http://synthetic.invalid/v2/quotas", client)
+	q := newQuotaProvider("http://hopper.invalid/v1/usage", client)
 	host := pluginapi.HostConfigSummary{ProxyURL: hostProxy.URL}
 	for _, r := range []pluginapi.QuotaFetchRequest{
 		{AuthID: "a", StorageJSON: []byte(`{"api_key":"one"}`), Metadata: map[string]any{"proxy_url": authProxy.URL}, Host: host},
@@ -38,10 +38,10 @@ func TestQuotaPollUsesAuthOrHostProxy(t *testing.T) {
 			t.Fatalf("%s: %v", r.AuthID, err)
 		}
 	}
-	if got := authSeen(); len(got) != 1 || got[0] != "http://synthetic.invalid/v2/quotas" {
+	if got := authSeen(); len(got) != 1 || got[0] != "http://hopper.invalid/v1/usage" {
 		t.Fatalf("auth proxy saw %v", got)
 	}
-	if got := hostSeen(); len(got) != 1 || got[0] != "http://synthetic.invalid/v2/quotas" {
+	if got := hostSeen(); len(got) != 1 || got[0] != "http://hopper.invalid/v1/usage" {
 		t.Fatalf("host proxy saw %v", got)
 	}
 }

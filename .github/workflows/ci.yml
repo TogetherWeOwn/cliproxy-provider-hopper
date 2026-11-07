@@ -22,7 +22,7 @@ jobs:
       - name: Isolated scratch directory
         run: |
           mkdir -p "$HOME/.cache"
-          echo "TMPDIR=$(mktemp -d "$HOME/.cache/synthetic-ci.XXXXXX")" >> "$GITHUB_ENV"
+          echo "TMPDIR=$(mktemp -d "$HOME/.cache/hopper-ci.XXXXXX")" >> "$GITHUB_ENV"
       - name: Formatting
         run: test -z "$(gofmt -l $(git ls-files '*.go') $(git ls-files --others --exclude-standard '*.go'))"
       - name: Vet
@@ -35,8 +35,8 @@ jobs:
         run: go -C integration/hostcompat test -race -count=1 ./...
       - name: Production C shared library
         run: |
-          go build -trimpath -buildmode=c-shared -o "$TMPDIR/synthetic.so" .
-          nm -D "$TMPDIR/synthetic.so" > "$TMPDIR/symbols.txt"
+          go build -trimpath -buildmode=c-shared -o "$TMPDIR/hopper.so" .
+          nm -D "$TMPDIR/hopper.so" > "$TMPDIR/symbols.txt"
           grep -q ' T cliproxy_plugin_init$' "$TMPDIR/symbols.txt"
       - name: Secret scan
         run: |
@@ -46,4 +46,4 @@ jobs:
       - name: Remove scratch directory
         if: always()
         run: |
-          if [[ -n "${TMPDIR:-}" && "$TMPDIR" == "$HOME/.cache/synthetic-ci."* ]]; then rm -rf -- "$TMPDIR"; fi
+          if [[ -n "${TMPDIR:-}" && "$TMPDIR" == "$HOME/.cache/hopper-ci."* ]]; then rm -rf -- "$TMPDIR"; fi

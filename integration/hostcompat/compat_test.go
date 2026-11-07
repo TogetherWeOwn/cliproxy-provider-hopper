@@ -51,12 +51,12 @@ func TestRealHostLoader(t *testing.T) {
 			t.Error("incorrect authorization")
 		}
 		switch r.URL.Path {
-		case "/v2/quotas":
+		case "/v1/usage":
 			polls.Add(1)
-			io.WriteString(w, `{"planWeeklyLimit":{"percentRemaining":25,"nextRegenAt":"2030-01-01T00:00:00Z","nextRegenPercent":2}}`)
-		case "/openai/v1/models":
-			io.WriteString(w, `{"data":[{"id":"syn:small:text"},{"id":"infinite:small:vision"},{"id":"hf:example/model"}]}`)
-		case "/openai/v1/chat/completions":
+			io.WriteString(w, `{"object":"usage","plan":{"key":"pro"},"windows":{"weekly":{"used_usd":30,"limit_usd":40,"resets_at":"2030-01-01T00:00:00Z"}}}`)
+		case "/v1/models":
+			io.WriteString(w, `{"data":[{"id":"deepseek-v4.1-flash"},{"id":"deepseek-v4.1-flash-1017"},{"id":"example/model"}]}`)
+		case "/v1/chat/completions":
 			var body map[string]any
 			if json.NewDecoder(r.Body).Decode(&body) != nil {
 				t.Error("invalid inference JSON")
@@ -64,17 +64,19 @@ func TestRealHostLoader(t *testing.T) {
 				return
 			}
 			model, _ := body["model"].(string)
-			if model != "syn:small:text" && model != "infinite:small:vision" && model != "hf:example/model" {
+			if model != "deepseek-v4.1-flash" && model != "deepseek-v4.1-flash-1017" && model != "example/model" {
 				t.Errorf("model prefix was not stripped: %q", model)
 			}
-			w.Header().Set("X-Synthetic-Quotas", `{"planWeeklyLimit":{"percentRemaining":88}}`)
+			w.Header().Set("X-Hopper-7d-Used-Usd", "4")
+			w.Header().Set("X-Hopper-7d-Limit-Usd", "40")
 			if status, ok := body["fixture_status"].(float64); ok && !(body["fixture_first_only"] == true && r.Header.Get("Authorization") == "Bearer second-key") {
 				if status == 429 {
-					ioHeader := `{"planWeeklyLimit":{"percentRemaining":0,"nextRegenAt":"2030-01-01T00:00:00Z"}}`
+					used := "40"
 					if body["fixture_concurrent"] == true {
-						ioHeader = `{"planWeeklyLimit":{"percentRemaining":20}}`
+						used = "32"
 					}
-					w.Header().Set("X-Synthetic-Quotas", ioHeader)
+					w.Header().Set("X-Hopper-7d-Used-Usd", used)
+					w.Header().Set("X-Hopper-7d-Reset", "2030-01-01T00:00:00Z")
 					w.Header().Set("Retry-After", "7")
 				}
 				w.WriteHeader(int(status))
@@ -84,9 +86,6 @@ func TestRealHostLoader(t *testing.T) {
 					io.WriteString(w, `{"error":"fixture upstream error"}`)
 				}
 				return
-			}
-			if model == "infinite:small:vision" && body["stream"] != true {
-				t.Error("Infinite was not forced to stream")
 			}
 			if body["stream"] == true {
 				w.Header().Set("Content-Type", "text/event-stream")
@@ -103,7 +102,7 @@ func TestRealHostLoader(t *testing.T) {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			io.WriteString(w, `{"id":"chat-example","object":"chat.completion","model":"syn:small:text","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`)
+			io.WriteString(w, `{"id":"chat-example","object":"chat.completion","model":"deepseek-v4.1-flash","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`)
 		default:
 			t.Errorf("unexpected path %s", r.URL.Path)
 			w.WriteHeader(404)
@@ -123,7 +122,7 @@ func TestRealHostLoader(t *testing.T) {
 	if runtime.GOOS == "darwin" {
 		ext = ".dylib"
 	}
-	lib := filepath.Join(arch, "synthetic"+ext)
+	lib := filepath.Join(arch, "hopper"+ext)
 	build := exec.Command("go", "build", "-tags=hostcompat", "-buildmode=c-shared", "-o", lib, ".")
 	build.Dir = root
 	build.Env = append(os.Environ(), "CGO_ENABLED=1")
@@ -138,25 +137,25 @@ func TestRealHostLoader(t *testing.T) {
 	if err = yaml.Unmarshal([]byte("enabled: true\nhostcompat_base: "+server.URL+"\n"), &raw); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &config.Config{AuthDir: t.TempDir(), Plugins: config.PluginsConfig{Enabled: true, Dir: dir, Configs: map[string]config.PluginInstanceConfig{"synthetic": {Enabled: &enabled, Raw: *raw.Content[0]}}}}
+	cfg := &config.Config{AuthDir: t.TempDir(), Plugins: config.PluginsConfig{Enabled: true, Dir: dir, Configs: map[string]config.PluginInstanceConfig{"hopper": {Enabled: &enabled, Raw: *raw.Content[0]}}}}
 	host := pluginhost.New()
 	defer host.ShutdownAll()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	ctx = logging.WithResponseHeadersHolder(ctx)
 	host.ApplyConfig(ctx, cfg)
-	if !host.PluginLoaded("synthetic") || !host.PluginRegistered("synthetic") || !host.HasAuthProvider("synthetic") || !host.HasQuotaProvider("synthetic") {
+	if !host.PluginLoaded("hopper") || !host.PluginRegistered("hopper") || !host.HasAuthProvider("hopper") || !host.HasQuotaProvider("hopper") {
 		t.Fatalf("registration %+v", host.RegisteredPlugins())
 	}
 	info := host.RegisteredPlugins()
-	if len(info) != 1 || !info[0].SupportsQuota || info[0].Metadata.Version != "0.2.3" {
+	if len(info) != 1 || !info[0].SupportsQuota || info[0].Metadata.Version != "0.1.0" {
 		t.Fatalf("metadata %+v", info)
 	}
-	auth, handled, err := host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: "example.json", RawJSON: []byte(`{"type":"synthetic","api_key":"example-key","label":"Example"}`)})
+	auth, handled, err := host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "hopper", FileName: "example.json", RawJSON: []byte(`{"type":"hopper","api_key":"example-key","label":"Example"}`)})
 	if err != nil || !handled || auth == nil {
 		t.Fatalf("auth %v %v", handled, err)
 	}
-	if _, _, err = host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: "duplicate.json", RawJSON: []byte(`{"type":"synthetic","api_key":"example-key"}`)}); err == nil {
+	if _, _, err = host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "hopper", FileName: "duplicate.json", RawJSON: []byte(`{"type":"hopper","api_key":"example-key"}`)}); err == nil {
 		t.Fatal("duplicate key accepted by real host parser")
 	}
 	file := filepath.Join(cfg.AuthDir, "example.json")
@@ -168,10 +167,10 @@ func TestRealHostLoader(t *testing.T) {
 		t.Fatal(err)
 	}
 	var fields map[string]any
-	if json.Unmarshal(saved, &fields) != nil || fields["type"] != "synthetic" || fields["label"] != "Example" {
+	if json.Unmarshal(saved, &fields) != nil || fields["type"] != "hopper" || fields["label"] != "Example" {
 		t.Fatal("host auth storage merge failed")
 	}
-	quotaReq := pluginapi.QuotaFetchRequest{AuthID: auth.ID, Provider: "synthetic", StorageJSON: saved}
+	quotaReq := pluginapi.QuotaFetchRequest{AuthID: auth.ID, Provider: "hopper", StorageJSON: saved}
 	quota, handled, err := host.FetchQuota(ctx, quotaReq)
 	if err != nil || !handled || len(quota.Groups) != 1 || quota.Groups[0].Buckets[0].RemainingFraction != .25 || polls.Load() != 1 {
 		t.Fatalf("quota %+v %v %v polls=%d", quota, handled, err, polls.Load())
@@ -180,12 +179,12 @@ func TestRealHostLoader(t *testing.T) {
 	host.RegisterModels(ctx, models{})
 	host.RegisterExecutors(m, models{})
 	host.RegisterUsagePlugins()
-	static := host.ModelsForProvider("synthetic")
-	if len(static) < 5 {
+	static := host.ModelsForProvider("hopper")
+	if len(static) != 3 {
 		t.Fatalf("static model registration %+v", static)
 	}
 	for _, model := range static {
-		if !strings.HasPrefix(model.ID, "synthetic/") {
+		if !strings.HasPrefix(model.ID, "hopper/") {
 			t.Fatalf("unprefixed static ID %q", model.ID)
 		}
 	}
@@ -194,15 +193,15 @@ func TestRealHostLoader(t *testing.T) {
 		t.Fatalf("model provider %+v", discovered)
 	}
 	for _, model := range discovered.Models {
-		if !strings.HasPrefix(model.ID, "synthetic/") {
+		if !strings.HasPrefix(model.ID, "hopper/") {
 			t.Fatalf("unprefixed discovery ID %q", model.ID)
 		}
 	}
-	ex, ok := m["synthetic"]
+	ex, ok := m["hopper"]
 	if !ok {
 		t.Fatal("executor not registered")
 	}
-	req := coreexec.Request{Model: "synthetic/syn:small:text", Payload: []byte(`{"model":"synthetic/syn:small:text","messages":[{"role":"user","content":"hello"}]}`), Format: translator.FormatOpenAI}
+	req := coreexec.Request{Model: "hopper/deepseek-v4.1-flash", Payload: []byte(`{"model":"hopper/deepseek-v4.1-flash","messages":[{"role":"user","content":"hello"}]}`), Format: translator.FormatOpenAI}
 	opts := coreexec.Options{SourceFormat: translator.FormatOpenAI, ResponseFormat: translator.FormatOpenAI}
 	resp, err := ex.Execute(ctx, auth, req, opts)
 	if err != nil || !strings.Contains(string(resp.Payload), `"content":"hello"`) {
@@ -211,7 +210,7 @@ func TestRealHostLoader(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		quota, _, err = host.FetchQuota(ctx, quotaReq)
-		if err == nil && len(quota.Groups) == 1 && quota.Groups[0].Buckets[0].RemainingFraction == .88 {
+		if err == nil && len(quota.Groups) == 1 && quota.Groups[0].Buckets[0].RemainingFraction == .9 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -222,12 +221,7 @@ func TestRealHostLoader(t *testing.T) {
 	if polls.Load() != 1 {
 		t.Fatal("header update triggered a quota poll")
 	}
-	infinite := coreexec.Request{Model: "synthetic/infinite:small:vision", Payload: []byte(`{"model":"synthetic/infinite:small:vision","messages":[{"role":"user","content":"hello"}]}`), Format: translator.FormatOpenAI}
-	resp, err = ex.Execute(ctx, auth, infinite, opts)
-	if err != nil || !strings.Contains(string(resp.Payload), `"object":"chat.completion"`) || !strings.Contains(string(resp.Payload), `"content":"hello"`) || !strings.Contains(string(resp.Payload), `"total_tokens":5`) {
-		t.Fatalf("Infinite aggregation %s %v", resp.Payload, err)
-	}
-	req.Payload = []byte(`{"model":"synthetic/syn:small:text","stream":true,"fixture_gate":true,"messages":[{"role":"user","content":"hello"}]}`)
+	req.Payload = []byte(`{"model":"hopper/deepseek-v4.1-flash","stream":true,"fixture_gate":true,"messages":[{"role":"user","content":"hello"}]}`)
 	opts.Stream = true
 	stream, err := ex.ExecuteStream(ctx, auth, req, opts)
 	if err != nil {
@@ -254,7 +248,7 @@ func TestRealHostLoader(t *testing.T) {
 	// [DONE] marker (the host appends its own terminator): the stream ends
 	// by channel close. The core-executor call carries no chat route, so
 	// the chunks stay data-framed.
-	if want := `data: {"id":"chat-example","object":"chat.completion.chunk","model":"syn:small:text","choices":[{"index":0,"delta":{"role":"assistant","content":"hel"},"finish_reason":null}]}` +
+	if want := `data: {"id":"chat-example","object":"chat.completion.chunk","model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{"role":"assistant","content":"hel"},"finish_reason":null}]}` +
 		`data: {"id":"chat-example","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":"stop"}]}` +
 		`data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`; chunks.String() != want {
 		t.Fatalf("stream %q want %q", chunks.String(), want)
@@ -265,7 +259,7 @@ func TestRealHostLoader(t *testing.T) {
 		concurrent bool
 		delay      time.Duration
 	}{{401, false, 0}, {402, false, time.Hour}, {403, false, time.Hour}, {404, false, 0}, {429, false, 7 * time.Second}, {429, true, 7 * time.Second}, {503, false, 0}} {
-		payload, _ := json.Marshal(map[string]any{"model": "synthetic/syn:small:text", "fixture_status": tc.status, "fixture_concurrent": tc.concurrent})
+		payload, _ := json.Marshal(map[string]any{"model": "hopper/deepseek-v4.1-flash", "fixture_status": tc.status, "fixture_concurrent": tc.concurrent})
 		req.Payload = payload
 		_, err = ex.Execute(ctx, auth, req, opts)
 		status, ok := err.(interface{ StatusCode() int })
@@ -280,7 +274,7 @@ func TestRealHostLoader(t *testing.T) {
 		}
 	}
 	t.Run("native payment failover isolates the failing auth", func(t *testing.T) {
-		second, handled, err := host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: "second.json", RawJSON: []byte(`{"type":"synthetic","api_key":"second-key"}`)})
+		second, handled, err := host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "hopper", FileName: "second.json", RawJSON: []byte(`{"type":"hopper","api_key":"second-key"}`)})
 		if err != nil || !handled || second == nil {
 			t.Fatalf("second auth %v", err)
 		}
@@ -298,11 +292,11 @@ func TestRealHostLoader(t *testing.T) {
 			if _, err := mgr.Register(ctx, a); err != nil {
 				t.Fatal(err)
 			}
-			registry.GetGlobalRegistry().RegisterClient(a.ID, a.Provider, []*registry.ModelInfo{{ID: "synthetic/syn:small:text"}})
+			registry.GetGlobalRegistry().RegisterClient(a.ID, a.Provider, []*registry.ModelInfo{{ID: "hopper/deepseek-v4.1-flash"}})
 			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(a.ID) })
 		}
-		call := coreexec.Request{Model: "synthetic/syn:small:text", Payload: []byte(`{"model":"synthetic/syn:small:text","fixture_status":402,"fixture_first_only":true}`), Format: translator.FormatOpenAI}
-		if _, err := mgr.Execute(ctx, []string{"synthetic"}, call, opts); err != nil {
+		call := coreexec.Request{Model: "hopper/deepseek-v4.1-flash", Payload: []byte(`{"model":"hopper/deepseek-v4.1-flash","fixture_status":402,"fixture_first_only":true}`), Format: translator.FormatOpenAI}
+		if _, err := mgr.Execute(ctx, []string{"hopper"}, call, opts); err != nil {
 			t.Fatalf("native sibling failover %v", err)
 		}
 		failed, _ := mgr.GetByID(first.ID)
@@ -325,10 +319,10 @@ func TestRealHostLoader(t *testing.T) {
 		if _, err := mgr.Register(ctx, one); err != nil {
 			t.Fatal(err)
 		}
-		model := "synthetic/syn:small:text"
+		model := "hopper/deepseek-v4.1-flash"
 		registry.GetGlobalRegistry().RegisterClient(one.ID, one.Provider, []*registry.ModelInfo{{ID: model}})
 		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(one.ID) })
-		_, err := mgr.Execute(ctx, []string{"synthetic"}, coreexec.Request{Model: model, Payload: []byte(`{"model":"synthetic/syn:small:text","fixture_status":429,"fixture_concurrent":true}`), Format: translator.FormatOpenAI}, opts)
+		_, err := mgr.Execute(ctx, []string{"hopper"}, coreexec.Request{Model: model, Payload: []byte(`{"model":"hopper/deepseek-v4.1-flash","fixture_status":429,"fixture_concurrent":true}`), Format: translator.FormatOpenAI}, opts)
 		if err == nil {
 			t.Fatal("concurrency failure disappeared")
 		}
@@ -350,7 +344,7 @@ func TestRegistryUsesNativeStoreSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg, err := pluginstore.ParseRegistry(raw)
-	if err != nil || reg.SchemaVersion != 1 || len(reg.Plugins) != 1 || reg.Plugins[0].ID != "synthetic" || reg.Plugins[0].Version != "0.2.3" || pluginstore.PluginInstallType(reg.Plugins[0]) != "github-release" {
+	if err != nil || reg.SchemaVersion != 1 || len(reg.Plugins) != 1 || reg.Plugins[0].ID != "hopper" || reg.Plugins[0].Version != "0.1.0" || pluginstore.PluginInstallType(reg.Plugins[0]) != "github-release" {
 		t.Fatalf("registry %+v %v", reg, err)
 	}
 }
