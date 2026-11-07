@@ -131,14 +131,23 @@ func TestQuotaPollRendersHopperCard(t *testing.T) {
 		t.Fatalf("card %+v", out)
 	}
 	b := out.Groups[0].Buckets
-	if b[0].Window != kit.CardWindowFiveHour || b[0].RemainingFraction != 0.75 || b[0].ResetTime != "2030-01-01T05:00:00Z" || b[0].Description != "$2.00 of $8.00 used" {
+	if b[0].Window != kit.CardWindowFiveHour || b[0].RemainingFraction != 0.75 || b[0].ResetTime != "2030-01-01T05:00:00Z" || b[0].Description != "5-hour limit" {
 		t.Fatalf("five-hour bucket %+v", b[0])
 	}
-	if b[1].Window != kit.CardWindowWeekly || b[1].RemainingFraction != 0.25 {
+	if b[1].Window != kit.CardWindowWeekly || b[1].RemainingFraction != 0.25 || b[1].Description != "Weekly limit" {
 		t.Fatalf("weekly bucket %+v", b[1])
 	}
 	if len(q.latest("a")) != 2 {
 		t.Fatal("poll not remembered for 429 hints")
+	}
+	if len(out.Summary) != 1 || out.Summary[0] != (pluginapi.QuotaMetric{Key: "account_balance_usd", Label: "Balance", Value: 5, Format: "currency", Currency: "USD"}) {
+		t.Fatalf("balance chip %+v", out.Summary)
+	}
+	// Response headers carry no balance, so a header refresh keeps the polled one.
+	q.HandleUsage(context.Background(), pluginapi.UsageRecord{Provider: provider, AuthID: "a", ResponseHeaders: hopperHeaders("3", "31")})
+	cached, err := q.cache.FetchQuota(context.Background(), pluginapi.QuotaFetchRequest{AuthID: "a", StorageJSON: []byte(`{"api_key":"example-key"}`)})
+	if err != nil || len(cached.Summary) != 1 || cached.Summary[0].Value != 5 || cached.Groups[0].Buckets[0].RemainingFraction != 0.625 {
+		t.Fatalf("header refresh %+v %v", cached, err)
 	}
 }
 

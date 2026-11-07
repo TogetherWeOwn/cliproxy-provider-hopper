@@ -40,10 +40,12 @@ func (q quotaReading) remainingFraction() float64 {
 
 func (q quotaReading) exhausted() bool { return q.UsedUSD >= q.LimitUSD }
 
-// quotaUsage is one observation: the plan key plus every window reported.
+// quotaUsage is one observation: the plan key, the prepaid credit balance
+// (only /v1/usage reports it) and every window reported.
 type quotaUsage struct {
-	Plan     string
-	Readings []quotaReading
+	Plan       string
+	BalanceUSD *float64
+	Readings   []quotaReading
 }
 
 type usageWindowWire struct {
@@ -61,6 +63,7 @@ type usageWire struct {
 		FiveHour *usageWindowWire `json:"five_hour"`
 		Weekly   *usageWindowWire `json:"weekly"`
 	} `json:"windows"`
+	CreditsRemainingUSD *float64 `json:"credits_remaining_usd"`
 }
 
 var errNoQuotaShape = errors.New("usage payload has no recognized window")
@@ -78,7 +81,7 @@ func parseUsage(raw []byte) (quotaUsage, error) {
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		return quotaUsage{}, fmt.Errorf("decode usage payload")
 	}
-	var out quotaUsage
+	out := quotaUsage{BalanceUSD: wire.CreditsRemainingUSD}
 	if wire.Plan != nil {
 		out.Plan = strings.TrimSpace(wire.Plan.Key)
 	}

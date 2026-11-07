@@ -51,10 +51,11 @@ Embedding models are not registered.
 ## Quota
 
 The quota card polls `GET /v1/usage` and renders one bucket per window
-(`5h` and `weekly`) with remaining fraction, reset time and USD used. Inference
+(`5h` and `weekly`, labelled "5-hour limit" and "Weekly limit") with remaining fraction and reset time. Inference
 responses carry `x-hopper-5h-*` and `x-hopper-7d-*` headers; the usage plugin
 refreshes the card from them without an extra poll. The plan chip shows the
-plan key reported by Hopper.
+plan key reported by Hopper, and a Balance chip shows the prepaid credits
+(`credits_remaining_usd`) from the latest usage poll.
 
 These readings are classification hints only: they never select or skip an
 account ahead of time.
