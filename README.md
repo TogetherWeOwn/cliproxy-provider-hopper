@@ -4,7 +4,7 @@ A [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) v8 provider plugin
 for [Hopper](https://withhopper.com), built on
 [cliproxy-provider-kit](https://github.com/TogetherWeOwn/cliproxy-provider-kit).
 
-- API-key authentication (`type: hopper` auth files or the management login page)
+- API-key authentication (`type: hopper` auth files)
 - Namespaced OpenAI-compatible chat models under the fixed `hopper/` prefix
 - Streaming and non-streaming chat completions, tool calls and reasoning fields pass through unchanged
 - Read-only quota cards for Hopper's five-hour and weekly USD spend windows
@@ -38,7 +38,15 @@ same key may be loaded from only one file.
 
 The plugin strips `hopper/` and calls `POST https://api.withhopper.com/v1/chat/completions`.
 Discovery uses `GET /v1/models` for each key, so a model appears only when that
-key is entitled to it. The static fallback catalog is:
+key is entitled to it. Serving runs through the kit `ModelCatalog`: every
+per-key request fetches fresh, and on failure serves the durable last-good
+list for that key, then the static fallback. Any fetch failure — an upstream
+error, an empty upstream list, an oversized body, a missing key or host
+client — takes this fallback path rather than returning an error. There is no background fetch or
+retry, so recovery waits for the next host event; a single fetch per request
+is all the kit performs. Embedding-named ids are excluded before serving. An
+id already carrying one `hopper/` prefix upstream is served once; a doubled
+prefix is rejected by the kit namespace filter. The static fallback catalog is:
 
 | CLIProxy ID | Upstream ID |
 |---|---|
