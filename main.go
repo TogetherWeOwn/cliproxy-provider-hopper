@@ -29,11 +29,12 @@ func makePlugin(host kit.Caller) (*kit.Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	models := newModelCatalog()
 	return kit.New(kit.Definition{
 		Metadata:       pluginapi.Metadata{Name: provider, Version: version, Author: "TogetherWeOwn", GitHubRepository: "https://github.com/TogetherWeOwn/cliproxy-provider-hopper", Logo: "https://www.google.com/s2/favicons?domain=withhopper.com"},
 		ModelNamespace: "hopper",
 		Configure:      configureBase,
-		Capabilities:   pluginapi.Capabilities{AuthProvider: auth, ModelRegistrar: catalog{}, ModelProvider: catalog{}, Executor: ex, ExecutorModelScope: pluginapi.ExecutorModelScopeBoth, ExecutorInputFormats: []string{"openai"}, ExecutorOutputFormats: []string{"openai"}, QuotaProvider: quota.cache, UsagePlugin: quota, ManagementAPI: auth.Login},
+		Capabilities:   pluginapi.Capabilities{AuthProvider: auth, ModelRegistrar: models, ModelProvider: models, Executor: ex, ExecutorModelScope: pluginapi.ExecutorModelScopeBoth, ExecutorInputFormats: []string{"openai"}, ExecutorOutputFormats: []string{"openai"}, QuotaProvider: quota.cache, UsagePlugin: quota},
 		OnShutdown:     func(context.Context) error { client.CloseIdleConnections(); return nil },
 	}, host)
 }
