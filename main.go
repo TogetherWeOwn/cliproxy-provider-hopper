@@ -10,7 +10,7 @@ import (
 
 const (
 	provider     = "hopper"
-	version      = "0.2.0"
+	version      = "0.2.1"
 	modelPrefix  = "hopper/"
 	upstreamBase = "https://api.withhopper.com"
 )

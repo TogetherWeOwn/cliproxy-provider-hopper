@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	providerkit "github.com/TogetherWeOwn/cliproxy-provider-kit"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
@@ -117,5 +119,97 @@ func TestDiscoveryPrefixesFiltersAndDoesNotInventEntitlements(t *testing.T) {
 		if out.Models[i].ID != want {
 			t.Fatalf("model %q want %q", out.Models[i].ID, want)
 		}
+	}
+}
+
+// TestStreamScoped429CarriesCredentialScope proves the stream path surfaces
+// the same credential-scoped pair as the HTTP path: an upstream 429 with an
+// exhausted response-local window on ExecuteStream returns an error that the
+// kit runtime maps without losing scope or the reset-derived retry-after.
+func TestStreamScoped429CarriesCredentialScope(t *testing.T) {
+	reset := time.Now().Add(30 * time.Minute).UTC().Format(time.RFC3339Nano)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Hopper-Plan", "pro")
+		w.Header().Set("X-Hopper-5h-Used-Usd", "8.000000")
+		w.Header().Set("X-Hopper-5h-Limit-Usd", "8.000000")
+		w.Header().Set("X-Hopper-5h-Reset", reset)
+		w.Header().Set("X-Hopper-7d-Used-Usd", "1.000000")
+		w.Header().Set("X-Hopper-7d-Limit-Usd", "40.000000")
+		w.Header().Set("X-Hopper-7d-Reset", reset)
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, `{"error":"usage window exhausted"}`)
+	}))
+	defer server.Close()
+	_, err := newExecutor(nil).ExecuteStream(context.Background(), pluginapi.ExecutorRequest{Payload: []byte(`{"model":"hopper/deepseek-v4.1-flash"}`), StorageJSON: []byte(`{"api_key":"example-key"}`), HTTPClient: mockHostClient{server}})
+	if err == nil {
+		t.Fatal("scoped stream 429 returned no error")
+	}
+	rpcErr, ok := err.(*pluginabi.Error)
+	if !ok {
+		t.Fatalf("scoped stream error type %T, want *pluginabi.Error", err)
+	}
+	if rpcErr.HTTPStatus != 429 || rpcErr.Code != "quota_exhausted" {
+		t.Fatalf("scoped stream error %+v", rpcErr)
+	}
+	if !rpcErr.CredentialScoped || !rpcErr.IsCredentialScoped() {
+		t.Fatalf("scoped stream CredentialScoped = %v, want true", rpcErr.CredentialScoped)
+	}
+	if rpcErr.RetryAfterSeconds < 1790 || rpcErr.RetryAfterSeconds > 1805 {
+		t.Fatalf("scoped stream RetryAfterSeconds = %d, want roughly 1800", rpcErr.RetryAfterSeconds)
+	}
+	// The kit runtime sends chunk errors as error_detail through MapError; a
+	// mapped *pluginabi.Error passes through with the scoped pair intact.
+	remapped := providerkit.MapError(rpcErr)
+	if !remapped.CredentialScoped || remapped.RetryAfterSeconds != rpcErr.RetryAfterSeconds {
+		t.Fatalf("remapped scoped pair %+v, want CredentialScoped and %d", remapped, rpcErr.RetryAfterSeconds)
+	}
+}
+
+// TestStreamConcurrency429StaysModelScoped proves the stream path for the
+// concurrency shape keeps the 5s model-scoped behavior unchanged.
+func TestStreamConcurrency429StaysModelScoped(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Hopper-5h-Used-Usd", "1.000000")
+		w.Header().Set("X-Hopper-5h-Limit-Usd", "8.000000")
+		w.Header().Set("X-Hopper-5h-Reset", "2030-01-01T05:00:00Z")
+		w.Header().Set("X-Hopper-7d-Used-Usd", "1.000000")
+		w.Header().Set("X-Hopper-7d-Limit-Usd", "40.000000")
+		w.Header().Set("X-Hopper-7d-Reset", "2030-01-06T00:00:00Z")
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, `{"error":"Too many concurrent requests"}`)
+	}))
+	defer server.Close()
+	_, err := newExecutor(nil).ExecuteStream(context.Background(), pluginapi.ExecutorRequest{Payload: []byte(`{"model":"hopper/deepseek-v4.1-flash"}`), StorageJSON: []byte(`{"api_key":"example-key"}`), HTTPClient: mockHostClient{server}})
+	if err == nil {
+		t.Fatal("concurrency stream 429 returned no error")
+	}
+	rpcErr, ok := err.(*pluginabi.Error)
+	if !ok {
+		t.Fatalf("concurrency stream error type %T, want *pluginabi.Error", err)
+	}
+	if rpcErr.HTTPStatus != 429 || rpcErr.Code != "concurrency_limit" || rpcErr.RetryAfterSeconds != 5 {
+		t.Fatalf("concurrency stream error %+v", rpcErr)
+	}
+	if rpcErr.CredentialScoped || rpcErr.IsCredentialScoped() {
+		t.Fatalf("concurrency stream CredentialScoped = %v, want false", rpcErr.CredentialScoped)
+	}
+	remapped := providerkit.MapError(rpcErr)
+	if remapped.CredentialScoped || remapped.RetryAfterSeconds != 5 {
+		t.Fatalf("remapped concurrency %+v, want unscoped with 5s", remapped)
+	}
+}
+
+// TestMapErrorKeepsScopedPairForErrorDetail pins the exact reset arithmetic
+// through the sanitizing map: the scoped classify result survives MapError
+// with the same reset-derived seconds under a pinned now.
+func TestMapErrorKeepsScopedPairForErrorDetail(t *testing.T) {
+	now := time.Date(2030, 1, 1, 4, 0, 0, 0, time.UTC)
+	wrapped := classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: hopperHeaders("8", "1")}, now, nil)
+	if wrapped.RetryAfterSeconds != 3600 || !wrapped.CredentialScoped {
+		t.Fatalf("wrapped %+v", wrapped)
+	}
+	remapped := providerkit.MapError(wrapped)
+	if !remapped.CredentialScoped || remapped.RetryAfterSeconds != 3600 || remapped.HTTPStatus != 429 || remapped.Code != "quota_exhausted" {
+		t.Fatalf("remapped %+v", remapped)
 	}
 }
