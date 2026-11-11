@@ -25,11 +25,20 @@ func readPRSizeCaller(t *testing.T) string {
 
 var pinnedUses = regexp.MustCompile(`uses: TogetherWeOwn/\.github/\.github/workflows/pr-size(?:-(?:gate|weekly))?\.yml@([0-9a-f]{40})`)
 
+var allOrgUses = regexp.MustCompile(`uses:\s*TogetherWeOwn/\.github/`)
+
 func TestPRSizeCallerPinsOrgReusables(t *testing.T) {
 	body := readPRSizeCaller(t)
 	matches := pinnedUses.FindAllStringSubmatch(body, -1)
 	if len(matches) != 3 {
 		t.Fatalf("want 3 pinned reusable calls, got %d", len(matches))
+	}
+	// Every org reusable reference must be pinned: an extra unpinned or
+	// floating uses: TogetherWeOwn/.github call would keep the pinned
+	// count at 3 but fail this check.
+	all := allOrgUses.FindAllString(body, -1)
+	if len(all) != len(matches) {
+		t.Fatalf("every org reusable uses: must be pinned to a SHA: %d org uses: vs %d pinned", len(all), len(matches))
 	}
 	// All three calls must share one pinned SHA: no floating ref, no
 	// per-call pin drift, no local script copy.
@@ -44,21 +53,80 @@ func TestPRSizeCallerPinsOrgReusables(t *testing.T) {
 	}
 }
 
+// jobPermissions extracts the permission map of one caller job by
+// scanning for the job header and its `permissions:` block. It returns
+// nil when the job or its permissions block is missing.
+func jobPermissions(body, job string) map[string]string {
+	lines := strings.Split(body, "\n")
+	inJob := false
+	inPerms := false
+	grants := map[string]string{}
+	for _, line := range lines {
+		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ") && strings.HasSuffix(line, ":") {
+			inJob = strings.TrimSpace(line) == job+":"
+			inPerms = false
+			continue
+		}
+		if !inJob {
+			continue
+		}
+		if line == "    permissions:" {
+			inPerms = true
+			continue
+		}
+		if inPerms {
+			if strings.HasPrefix(line, "      ") {
+				trimmed := strings.TrimSpace(line)
+				if k, v, ok := strings.Cut(trimmed, ":"); ok {
+					grants[strings.TrimSpace(k)] = strings.TrimSpace(v)
+				}
+				continue
+			}
+			inPerms = false
+		}
+	}
+	if len(grants) == 0 {
+		return nil
+	}
+	return grants
+}
+
+func assertGrants(t *testing.T, job string, body string, want map[string]string) {
+	t.Helper()
+	got := jobPermissions(body, job)
+	if got == nil {
+		t.Fatalf("job %q missing permissions grant (want %v)", job, want)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("job %q grants %v, want exact %v", job, got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("job %q grant %s=%q, want %s=%q (all grants %v)", job, k, got[k], k, v, got)
+		}
+	}
+}
+
 func TestPRSizeCallerScopes(t *testing.T) {
 	body := readPRSizeCaller(t)
 	// The labeller and the required gate write back; the weekly tally
 	// stays read-only. GitHub validates nested-job permissions against
-	// the caller grant, so keep the grants minimal.
-	for _, want := range []string{"issues: write", "pull-requests: write"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("caller jobs must grant %q", want)
-		}
+	// the caller grant, so keep the grants minimal AND per-job: a write
+	// grant in the file alone does not prove the weekly job is
+	// read-only. Assert each job's exact scope set.
+	write := map[string]string{
+		"contents":      "read",
+		"issues":        "write",
+		"pull-requests": "write",
 	}
-	for _, job := range []string{"  pr-size:", "  pr-size-gate:", "  pr-size-weekly:"} {
-		if !strings.Contains(body, job) {
-			t.Fatalf("caller must keep job %q", job)
-		}
+	read := map[string]string{
+		"contents":      "read",
+		"issues":        "read",
+		"pull-requests": "read",
 	}
+	assertGrants(t, "pr-size", body, write)
+	assertGrants(t, "pr-size-gate", body, write)
+	assertGrants(t, "pr-size-weekly", body, read)
 }
 
 func TestPRSizeCallerGateTriggers(t *testing.T) {
