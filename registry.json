@@ -7,7 +7,7 @@
       "description": "API-key authentication, namespaced OpenAI chat models and read-only Hopper usage-window quota cards",
       "author": "TogetherWeOwn",
       "repository": "https://github.com/TogetherWeOwn/cliproxy-provider-hopper",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "license": "MIT",
       "tags": ["provider", "hopper", "quota"],
       "install": {"type": "github-release"}

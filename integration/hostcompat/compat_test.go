@@ -41,7 +41,7 @@ func (models) RegisterClient(string, string, []*registry.ModelInfo) {}
 func (models) UnregisterClient(string)                              {}
 func (models) GetModelProviders(string) []string                    { return nil }
 
-// The actual v8.0.49 loader performs dlopen, C-ABI registration, RPC dispatch,
+// The actual v8.0.63 loader performs dlopen, C-ABI registration, RPC dispatch,
 // persistence and executor/usage adapters. Only the upstream is an httptest mock.
 func TestRealHostLoader(t *testing.T) {
 	var polls atomic.Int32
@@ -148,7 +148,7 @@ func TestRealHostLoader(t *testing.T) {
 		t.Fatalf("registration %+v", host.RegisteredPlugins())
 	}
 	info := host.RegisteredPlugins()
-	if len(info) != 1 || !info[0].SupportsQuota || info[0].Metadata.Version != "0.2.0" {
+	if len(info) != 1 || !info[0].SupportsQuota || info[0].Metadata.Version != "0.2.1" {
 		t.Fatalf("metadata %+v", info)
 	}
 	auth, handled, err := host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "hopper", FileName: "example.json", RawJSON: []byte(`{"type":"hopper","api_key":"example-key","label":"Example"}`)})
@@ -334,7 +334,7 @@ func TestRealHostLoader(t *testing.T) {
 		if state == nil || !state.Quota.Exceeded {
 			t.Fatalf("pinned host behavior changed; revisit documented RPC limitation: %+v", state)
 		}
-		t.Log("v8.0.49 RPC drops the transient marker and marks concurrency 429 as model quota exceeded")
+		t.Log("v8.0.63 RPC drops the transient marker and marks concurrency 429 as model quota exceeded")
 	})
 }
 
@@ -344,7 +344,7 @@ func TestRegistryUsesNativeStoreSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg, err := pluginstore.ParseRegistry(raw)
-	if err != nil || reg.SchemaVersion != 1 || len(reg.Plugins) != 1 || reg.Plugins[0].ID != "hopper" || reg.Plugins[0].Version != "0.2.0" || pluginstore.PluginInstallType(reg.Plugins[0]) != "github-release" {
+	if err != nil || reg.SchemaVersion != 1 || len(reg.Plugins) != 1 || reg.Plugins[0].ID != "hopper" || reg.Plugins[0].Version != "0.2.1" || pluginstore.PluginInstallType(reg.Plugins[0]) != "github-release" {
 		t.Fatalf("registry %+v %v", reg, err)
 	}
 }

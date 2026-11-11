@@ -2,7 +2,10 @@
 
 A [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) v8 provider plugin
 for [Hopper](https://withhopper.com), built on
-[cliproxy-provider-kit](https://github.com/TogetherWeOwn/cliproxy-provider-kit).
+[cliproxy-provider-kit](https://github.com/TogetherWeOwn/cliproxy-provider-kit)
+with stock CLIProxyAPI **v8.0.63**. Both module graphs require Go **1.26.11**.
+CI targets the **real stock v8.0.63 C-ABI loader**. The supported host
+baseline is **v8.0.63**; v8.0.49 compatibility is not claimed.
 
 - API-key authentication (`type: hopper` auth files)
 - Namespaced OpenAI-compatible chat models under the fixed `hopper/` prefix
@@ -79,14 +82,20 @@ account ahead of time.
 | 429, windows have headroom and the body names concurrency | `concurrency_limit` | 5 s |
 | 5xx, 408 | `upstream_error` | retryable |
 
-An upstream `Retry-After` header always wins. No response body or credential is
-copied into an error.
+An account-wide `quota_exhausted` 429 with exhaustion evidence (a response header
+window at or over its limit, or a cached exhausted window whose reset produced
+the retry-after) is credential-scoped: the host cools the whole credential
+across all models until `RetryAfterSeconds`. A header-less 429 at the flat 60s
+with no exhausted window observed, the `concurrency_limit` 429 (5 s), and every
+non-429 branch stay model-scoped. The public code and message are unchanged; an
+upstream `Retry-After` header always wins for the duration. No response body or
+credential is copied into an error.
 
 ## Development
 
 ```sh
 go test -race ./...
-go -C integration/hostcompat test -race ./...   # real v8.0.49 host loader
+go -C integration/hostcompat test -race ./...   # real v8.0.63 host loader
 bash scripts/package-release.sh dist
 ```
 

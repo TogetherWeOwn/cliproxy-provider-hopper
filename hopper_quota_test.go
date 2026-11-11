@@ -76,28 +76,66 @@ func TestRetryAtWaitsForEveryExhaustedWindow(t *testing.T) {
 
 func TestClassify429(t *testing.T) {
 	now := time.Date(2030, 1, 1, 4, 0, 0, 0, time.UTC)
+	// Response-local exhaustion scopes the 429 across the credential with the
+	// exact reset-derived retry-after (05:00 reset minus 04:00 pinned now).
 	exhausted := classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: hopperHeaders("8", "1")}, now, nil)
 	if exhausted.Code != "quota_exhausted" || exhausted.RetryAfterSeconds != 3600 || !exhausted.Retryable {
 		t.Fatalf("exhausted %+v", exhausted)
+	}
+	if exhausted.HTTPStatus != 429 || !exhausted.CredentialScoped || !exhausted.IsCredentialScoped() {
+		t.Fatalf("exhausted scope %+v", exhausted)
+	}
+	// Weekly-only exhaustion also scopes, with the weekly reset (7 days).
+	weekly := classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: hopperHeaders("1", "40")}, now, nil)
+	if weekly.Code != "quota_exhausted" || !weekly.CredentialScoped || weekly.HTTPStatus != 429 {
+		t.Fatalf("weekly exhausted %+v", weekly)
 	}
 	concurrent := classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: hopperHeaders("1", "1"), Body: []byte(`{"error":"too many concurrent requests"}`)}, now, nil)
 	if concurrent.Code != "concurrency_limit" || concurrent.RetryAfterSeconds != 5 {
 		t.Fatalf("concurrent %+v", concurrent)
 	}
-	// Cached headroom never downgrades a header-less 429 to concurrency.
+	if concurrent.CredentialScoped || concurrent.IsCredentialScoped() {
+		t.Fatalf("concurrent scoped %+v", concurrent)
+	}
+	// Cached headroom never downgrades a header-less 429 to concurrency, and
+	// without exhaustion evidence the flat-60s fallback stays model-scoped.
 	cached, _ := usageFromHeaders(hopperHeaders("1", "1"))
 	bare := classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Body: []byte(`concurrency`)}, now, cached.Readings)
 	if bare.Code != "quota_exhausted" || bare.RetryAfterSeconds != 60 {
 		t.Fatalf("bare %+v", bare)
 	}
-	// A header-less 429 borrows cached exhaustion for its RetryAfter hint.
+	if bare.CredentialScoped || bare.HTTPStatus != 429 {
+		t.Fatalf("bare scope %+v", bare)
+	}
+	// A header-less generic 429 with no exhausted window observed stays unscoped.
+	if e := classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429}, now, nil); e.Code != "quota_exhausted" || e.RetryAfterSeconds != 60 || e.CredentialScoped {
+		t.Fatalf("generic %+v", e)
+	}
+	// Header-local headroom without a concurrency body cannot scope: no exhaustion.
+	plain := classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: hopperHeaders("1", "1")}, now, nil)
+	if plain.Code != "quota_exhausted" || plain.RetryAfterSeconds != 60 || plain.CredentialScoped {
+		t.Fatalf("headroom plain %+v", plain)
+	}
+	// A header-less 429 borrows cached exhaustion for its RetryAfter hint and scopes.
 	full, _ := usageFromHeaders(hopperHeaders("8", "1"))
-	if e := classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429}, now, full.Readings); e.RetryAfterSeconds != 3600 {
+	if e := classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429}, now, full.Readings); e.RetryAfterSeconds != 3600 || !e.CredentialScoped || e.HTTPStatus != 429 {
 		t.Fatalf("cached %+v", e)
+	}
+	// Cached exhaustion with an unknown reset never produced a retry-after
+	// candidate, so it stays model-scoped at the flat 60s.
+	unknownReset := []quotaReading{{Window: windowFiveHour, UsedUSD: 8, LimitUSD: 8}}
+	if e := classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429}, now, unknownReset); e.RetryAfterSeconds != 60 || e.CredentialScoped {
+		t.Fatalf("unknown reset %+v", e)
+	}
+	// A concurrency body never downgrades a header-local exhaustion: the
+	// exhaustion branch still scopes with the reset-derived retry-after.
+	exhaustedConcurrent := classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: hopperHeaders("8", "1"), Body: []byte(`too many concurrent requests`)}, now, nil)
+	if exhaustedConcurrent.Code != "quota_exhausted" || exhaustedConcurrent.RetryAfterSeconds != 3600 || !exhaustedConcurrent.CredentialScoped {
+		t.Fatalf("exhausted concurrent %+v", exhaustedConcurrent)
 	}
 	h := hopperHeaders("8", "1")
 	h.Set("Retry-After", "7")
-	if e := classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: h}, now, nil); e.RetryAfterSeconds != 7 {
+	if e := classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: h}, now, nil); e.RetryAfterSeconds != 7 || !e.CredentialScoped || e.HTTPStatus != 429 {
 		t.Fatalf("retry-after %+v", e)
 	}
 }
@@ -110,6 +148,17 @@ func TestClassifyStatusesNeverEchoBody(t *testing.T) {
 		}
 		if e.Retryable != (status >= 500) {
 			t.Fatalf("%d retryable %v", status, e.Retryable)
+		}
+		// Non-429 branches never carry credential scope, even with a 3600s hint.
+		if e.CredentialScoped || e.IsCredentialScoped() {
+			t.Fatalf("%d scoped %+v", status, e)
+		}
+		wantRetry := 0
+		if status == 402 || status == 403 {
+			wantRetry = 3600
+		}
+		if e.RetryAfterSeconds != wantRetry {
+			t.Fatalf("%d retry %d want %d", status, e.RetryAfterSeconds, wantRetry)
 		}
 	}
 }

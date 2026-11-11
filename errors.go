@@ -18,6 +18,22 @@ func classifyFailure(resp pluginapi.HTTPResponse, now time.Time) *pluginabi.Erro
 
 // classifyWithQuota maps an upstream failure. cached windows only fill a
 // 429's RetryAfter hint when the response itself carries no usage headers.
+//
+// Credential scope for a 429 (HTTPStatus stays 429, provider Code kept as
+// quota_exhausted): CredentialScoped is true only when the non-concurrency
+// branch has exhaustion evidence:
+//
+//	(hasHeader && anyExhausted(headerReadings))
+//		|| (!hasHeader && anyExhausted(cached) && retryAt(cached).After(now))
+//
+// Response-local headers are fresh evidence, so exhaustion alone scopes; a
+// cached window is stale evidence, so it scopes only when its reset actually
+// produced the retry-after candidate (retryAt in the future, not the flat 60s).
+// A header-less generic 429 at the flat 60s with no exhausted window observed
+// stays model-scoped, as do the concurrency branch (5s) and every non-429
+// branch. An upstream Retry-After header always wins for the duration but does
+// not change this predicate; cached headroom never downgrades a header-local
+// exhaustion to concurrency.
 func classifyWithQuota(resp pluginapi.HTTPResponse, now time.Time, cached []quotaReading) *pluginabi.Error {
 	e := &pluginabi.Error{Code: "upstream_error", Message: "Hopper request failed", HTTPStatus: resp.StatusCode, RetryAfterSeconds: kit.RetryAfterSeconds(resp.Headers.Get("Retry-After"), now)}
 	switch resp.StatusCode {
@@ -43,13 +59,15 @@ func classifyWithQuota(resp pluginapi.HTTPResponse, now time.Time, cached []quot
 			e.Code, e.Message, e.RetryAfterSeconds = "concurrency_limit", "Hopper concurrency limit reached", 5
 		} else {
 			e.Code, e.Message, e.RetryAfterSeconds = "quota_exhausted", "Hopper usage window or rate limit reached", 60
-			if at := retryAt(readings); at.After(now) {
+			at := retryAt(readings)
+			if at.After(now) {
 				seconds := math.Ceil(at.Sub(now).Seconds())
 				if seconds > math.MaxInt32 {
 					seconds = math.MaxInt32
 				}
 				e.RetryAfterSeconds = int(seconds)
 			}
+			e.CredentialScoped = (hasHeader && anyExhausted(usage.Readings)) || (!hasHeader && anyExhausted(cached) && at.After(now))
 		}
 		if n := kit.RetryAfterSeconds(resp.Headers.Get("Retry-After"), now); n > 0 {
 			e.RetryAfterSeconds = n
