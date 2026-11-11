@@ -182,7 +182,7 @@ func TestPRSizeCallerGateTriggers(t *testing.T) {
 	// Exception label changes and review submission/dismissal must
 	// re-evaluate the gate without a manual re-run.
 	want := map[string][]string{
-		"pull_request":        {"opened", "synchronize", "reopened", "ready_for_review", "labeled", "unlabeled"},
+		"pull_request":        {"opened", "synchronize", "reopened", "ready_for_review", "labeled", "unlabeled", "edited"},
 		"pull_request_review": {"submitted", "dismissed"},
 	}
 	for event, types := range want {
@@ -195,6 +195,17 @@ func TestPRSizeCallerGateTriggers(t *testing.T) {
 				t.Fatalf("caller must keep %s trigger type %q (got %v)", event, typ, got)
 			}
 		}
+	}
+	// A manual dispatch must not displace a pending PR-associated run in
+	// the shared concurrency group, and a retargeted PR must re-run: the
+	// concurrency group separates workflow_dispatch runs with a
+	// `-dispatch` suffix. Without it, a dispatch can cancel a pending
+	// PR run and leave a stale green check on an ungated diff.
+	if !strings.Contains(body, "'-dispatch'") {
+		t.Fatal("caller concurrency must separate workflow_dispatch runs with a -dispatch suffix")
+	}
+	if !strings.Contains(body, "does not refresh required checks") {
+		t.Fatal("caller dispatch description must state it does not refresh required checks")
 	}
 	if !strings.Contains(body, "exclude-extra:") {
 		t.Fatal("caller must keep exclude-extra inputs")
