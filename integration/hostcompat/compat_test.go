@@ -45,6 +45,7 @@ func (models) GetModelProviders(string) []string                    { return nil
 // persistence and executor/usage adapters. Only the upstream is an httptest mock.
 func TestRealHostLoader(t *testing.T) {
 	var polls atomic.Int32
+	var chatHits atomic.Int32
 	gate := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer example-key" && r.Header.Get("Authorization") != "Bearer second-key" {
@@ -57,6 +58,7 @@ func TestRealHostLoader(t *testing.T) {
 		case "/v1/models":
 			io.WriteString(w, `{"data":[{"id":"deepseek-v4.1-flash"},{"id":"deepseek-v4.1-flash-1017"},{"id":"example/model"}]}`)
 		case "/v1/chat/completions":
+			chatHits.Add(1)
 			var body map[string]any
 			if json.NewDecoder(r.Body).Decode(&body) != nil {
 				t.Error("invalid inference JSON")
@@ -67,10 +69,13 @@ func TestRealHostLoader(t *testing.T) {
 			if model != "deepseek-v4.1-flash" && model != "deepseek-v4.1-flash-1017" && model != "example/model" {
 				t.Errorf("model prefix was not stripped: %q", model)
 			}
-			w.Header().Set("X-Hopper-7d-Used-Usd", "4")
-			w.Header().Set("X-Hopper-7d-Limit-Usd", "40")
+			noHeaders := body["fixture_no_headers"] == true
+			if !noHeaders {
+				w.Header().Set("X-Hopper-7d-Used-Usd", "4")
+				w.Header().Set("X-Hopper-7d-Limit-Usd", "40")
+			}
 			if status, ok := body["fixture_status"].(float64); ok && !(body["fixture_first_only"] == true && r.Header.Get("Authorization") == "Bearer second-key") {
-				if status == 429 {
+				if status == 429 && !noHeaders {
 					used := "40"
 					if body["fixture_concurrent"] == true {
 						used = "32"
@@ -337,6 +342,120 @@ func TestRealHostLoader(t *testing.T) {
 			t.Fatalf("pinned host behavior changed; revisit documented RPC limitation: %+v", state)
 		}
 		t.Log("v8.0.63 RPC drops the transient marker and marks concurrency 429 as model quota exceeded")
+	})
+	t.Run("scoped quota cools the whole credential across models", func(t *testing.T) {
+		// Proves the plugin RPC's CredentialScoped flag survives the host ABI:
+		// a header-evidenced 429 on one model must cool the same credential for
+		// a second model on the real v8.0.63 host, while a sibling credential
+		// stays usable. If the mapping dropped the flag, every in-process test
+		// would still pass but this real-host check would fail.
+		const modelA = "hopper/deepseek-v4.1-flash"
+		const modelB = "hopper/deepseek-v4.1-flash-1017"
+		register := func(t *testing.T, mgr *coreauth.Manager, a *coreauth.Auth) {
+			t.Helper()
+			if _, err := mgr.Register(ctx, a); err != nil {
+				t.Fatal(err)
+			}
+			registry.GetGlobalRegistry().RegisterClient(a.ID, a.Provider, []*registry.ModelInfo{{ID: modelA}, {ID: modelB}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(a.ID) })
+		}
+		// Single-auth manager: after the scoped 429 on modelA, modelB must not
+		// reach the upstream at all (host selection skips the cooled credential).
+		mgr := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
+		mgr.SetRetryConfig(0, 0, 1)
+		mgr.RegisterExecutor(ex)
+		only := auth.Clone()
+		only.ID = "scoped-auth"
+		only.Status = coreauth.StatusActive
+		only.Attributes = map[string]string{"type": "api_key"}
+		register(t, mgr, only)
+		execOpts := coreexec.Options{SourceFormat: translator.FormatOpenAI, ResponseFormat: translator.FormatOpenAI}
+		// Seed a healthy modelB state so propagation to the sibling model is observable.
+		if _, err := mgr.Execute(ctx, []string{"hopper"}, coreexec.Request{Model: modelB, Payload: []byte(`{"model":"hopper/deepseek-v4.1-flash-1017","messages":[{"role":"user","content":"hello"}]}`), Format: translator.FormatOpenAI}, execOpts); err != nil {
+			t.Fatalf("seed modelB execute %v", err)
+		}
+		_, err := mgr.Execute(ctx, []string{"hopper"}, coreexec.Request{Model: modelA, Payload: []byte(`{"model":"hopper/deepseek-v4.1-flash","fixture_status":429}`), Format: translator.FormatOpenAI}, execOpts)
+		if err == nil {
+			t.Fatal("scoped 429 disappeared")
+		}
+		got, _ := mgr.GetByID(only.ID)
+		if !got.Quota.Exceeded || got.Quota.Reason != "credential_quota" || !got.Unavailable || !got.NextRetryAfter.After(time.Now().Add(5*time.Second)) {
+			t.Fatalf("scoped 429 did not credential-cool: %+v", got)
+		}
+		sibling := got.ModelStates[modelB]
+		if sibling == nil || !sibling.Unavailable || sibling.Quota.Reason != "credential_quota" {
+			t.Fatalf("sibling model state not propagated: %+v", sibling)
+		}
+		before := chatHits.Load()
+		if _, err := mgr.Execute(ctx, []string{"hopper"}, coreexec.Request{Model: modelB, Payload: []byte(`{"model":"hopper/deepseek-v4.1-flash-1017","messages":[{"role":"user","content":"hello"}]}`), Format: translator.FormatOpenAI}, execOpts); err == nil {
+			t.Fatal("cooled credential accepted a second-model request")
+		}
+		if chatHits.Load() != before {
+			t.Fatalf("cooled credential reached upstream for second model: hits %d -> %d", before, chatHits.Load())
+		}
+		// Two-auth manager: the sibling credential must still serve modelB.
+		mgr2 := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
+		mgr2.SetRetryConfig(0, 0, 2)
+		mgr2.RegisterExecutor(ex)
+		first := auth.Clone()
+		first.ID = "scoped-first"
+		first.Status = coreauth.StatusActive
+		first.Attributes = map[string]string{"type": "api_key", "priority": "10"}
+		second, handled, err := host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "hopper", FileName: "second.json", RawJSON: []byte(`{"type":"hopper","api_key":"second-key"}`)})
+		if err != nil || !handled || second == nil {
+			t.Fatalf("second auth %v", err)
+		}
+		second = second.Clone()
+		second.ID = "scoped-second"
+		second.Status = coreauth.StatusActive
+		register(t, mgr2, first)
+		register(t, mgr2, second)
+		if _, err := mgr2.Execute(ctx, []string{"hopper"}, coreexec.Request{Model: modelA, Payload: []byte(`{"model":"hopper/deepseek-v4.1-flash","fixture_status":429,"fixture_first_only":true}`), Format: translator.FormatOpenAI}, execOpts); err != nil {
+			t.Fatalf("sibling failover execute %v", err)
+		}
+		failed, _ := mgr2.GetByID(first.ID)
+		healthy, _ := mgr2.GetByID(second.ID)
+		if !failed.Quota.Exceeded || failed.Quota.Reason != "credential_quota" || !failed.Unavailable {
+			t.Fatalf("first auth not credential-cooled: %+v", failed)
+		}
+		if healthy.Unavailable || healthy.Quota.Exceeded {
+			t.Fatalf("healthy sibling impaired: %+v", healthy)
+		}
+	})
+	t.Run("header-less 429 does not credential-cool", func(t *testing.T) {
+		// A generic 429 with no usage headers and no cached exhausted window
+		// stays model-scoped on the real host: the same credential must still
+		// serve a second model afterwards.
+		const modelA = "hopper/deepseek-v4.1-flash"
+		const modelB = "hopper/deepseek-v4.1-flash-1017"
+		mgr := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
+		mgr.SetRetryConfig(0, 0, 1)
+		mgr.RegisterExecutor(ex)
+		headless := auth.Clone()
+		headless.ID = "headless-auth"
+		headless.Status = coreauth.StatusActive
+		headless.Attributes = map[string]string{"type": "api_key"}
+		if _, err := mgr.Register(ctx, headless); err != nil {
+			t.Fatal(err)
+		}
+		registry.GetGlobalRegistry().RegisterClient(headless.ID, headless.Provider, []*registry.ModelInfo{{ID: modelA}, {ID: modelB}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(headless.ID) })
+		execOpts := coreexec.Options{SourceFormat: translator.FormatOpenAI, ResponseFormat: translator.FormatOpenAI}
+		before := chatHits.Load()
+		_, err := mgr.Execute(ctx, []string{"hopper"}, coreexec.Request{Model: modelA, Payload: []byte(`{"model":"hopper/deepseek-v4.1-flash","fixture_status":429,"fixture_no_headers":true}`), Format: translator.FormatOpenAI}, execOpts)
+		if err == nil {
+			t.Fatal("header-less 429 disappeared")
+		}
+		if chatHits.Load() == before {
+			t.Fatalf("header-less 429 never reached upstream: %v", err)
+		}
+		got, _ := mgr.GetByID(headless.ID)
+		if got.Quota.Reason == "credential_quota" {
+			t.Fatalf("header-less 429 credential-cooled: %+v", got)
+		}
+		if _, err := mgr.Execute(ctx, []string{"hopper"}, coreexec.Request{Model: modelB, Payload: []byte(`{"model":"hopper/deepseek-v4.1-flash-1017","messages":[{"role":"user","content":"hello"}]}`), Format: translator.FormatOpenAI}, execOpts); err != nil {
+			t.Fatalf("second model blocked by model-scoped 429: %v", err)
+		}
 	})
 }
 
