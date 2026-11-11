@@ -244,13 +244,15 @@ func TestRealHostLoader(t *testing.T) {
 		}
 		chunks.Write(c.Payload)
 	}
-	// The kit re-frames to one data event per chunk and drops the SSE
-	// [DONE] marker (the host appends its own terminator): the stream ends
-	// by channel close. The core-executor call carries no chat route, so
-	// the chunks stay data-framed.
-	if want := `data: {"id":"chat-example","object":"chat.completion.chunk","model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{"role":"assistant","content":"hel"},"finish_reason":null}]}` +
-		`data: {"id":"chat-example","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":"stop"}]}` +
-		`data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`; chunks.String() != want {
+	// The kit drops the SSE [DONE] marker (the host appends its own
+	// terminator): the stream ends by channel close. The v8.0.63 host
+	// normalizes same-format plugin streams to bare payloads, matching the
+	// built-in executors whose handlers add "data:" themselves, so the
+	// core-executor layer sees bare JSON even though the client wire stays
+	// data-framed. (v8.0.49 passed plugin chunks through untouched.)
+	if want := `{"id":"chat-example","object":"chat.completion.chunk","model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{"role":"assistant","content":"hel"},"finish_reason":null}]}` +
+		`{"id":"chat-example","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":"stop"}]}` +
+		`{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`; chunks.String() != want {
 		t.Fatalf("stream %q want %q", chunks.String(), want)
 	}
 	opts.Stream = false
