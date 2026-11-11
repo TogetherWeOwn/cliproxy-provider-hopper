@@ -48,9 +48,40 @@ func TestPRSizeCallerPinsOrgReusables(t *testing.T) {
 			t.Fatalf("pin drift: %q vs %q", sha, m[1])
 		}
 	}
+	// Counting matches alone would pass if one job called another
+	// job's reusable (e.g. the gate job calling pr-size.yml), so check
+	// each job's uses: value is exactly its own reusable at the shared
+	// SHA.
+	for job, want := range map[string]string{
+		"pr-size":        "pr-size.yml",
+		"pr-size-gate":   "pr-size-gate.yml",
+		"pr-size-weekly": "pr-size-weekly.yml",
+	} {
+		wantUses := "TogetherWeOwn/.github/.github/workflows/" + want + "@" + sha
+		if got := jobUses(body, job); got != wantUses {
+			t.Fatalf("job %q uses %q, want %q", job, got, wantUses)
+		}
+	}
 	if _, err := os.Stat(".github/scripts/pr_size.py"); err == nil {
 		t.Fatal("caller must not carry a local copy of the labeller script")
 	}
+}
+
+// jobUses returns the `uses:` value of one caller job, or "" when the
+// job or its uses: line is missing.
+func jobUses(body, job string) string {
+	lines := strings.Split(body, "\n")
+	inJob := false
+	for _, line := range lines {
+		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ") && strings.HasSuffix(line, ":") {
+			inJob = strings.TrimSpace(line) == job+":"
+			continue
+		}
+		if inJob && strings.HasPrefix(line, "    uses: ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "    uses: "))
+		}
+	}
+	return ""
 }
 
 // jobPermissions extracts the permission map of one caller job by
@@ -129,19 +160,44 @@ func TestPRSizeCallerScopes(t *testing.T) {
 	assertGrants(t, "pr-size-weekly", body, read)
 }
 
+// triggerTypes returns the activity type set of one `on:` event block.
+// A substring search would pass when `labeled` is dropped but
+// `unlabeled` remains, so each event's `types:` list is parsed and
+// compared by membership.
+func triggerTypes(body, event string) map[string]bool {
+	re := regexp.MustCompile(`(?m)^  ` + regexp.QuoteMeta(event) + `:\n\s+types: \[([^\]]*)\]`)
+	m := re.FindStringSubmatch(body)
+	if m == nil {
+		return nil
+	}
+	types := map[string]bool{}
+	for _, name := range strings.Split(m[1], ",") {
+		types[strings.TrimSpace(name)] = true
+	}
+	return types
+}
+
 func TestPRSizeCallerGateTriggers(t *testing.T) {
 	body := readPRSizeCaller(t)
 	// Exception label changes and review submission/dismissal must
 	// re-evaluate the gate without a manual re-run.
-	for _, want := range []string{
-		"labeled",
-		"unlabeled",
-		"pull_request_review:",
-		"exclude-extra:",
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("caller must keep gate trigger %q", want)
+	want := map[string][]string{
+		"pull_request":        {"opened", "synchronize", "reopened", "ready_for_review", "labeled", "unlabeled"},
+		"pull_request_review": {"submitted", "dismissed"},
+	}
+	for event, types := range want {
+		got := triggerTypes(body, event)
+		if got == nil {
+			t.Fatalf("caller must keep %s trigger types %v", event, types)
 		}
+		for _, typ := range types {
+			if !got[typ] {
+				t.Fatalf("caller must keep %s trigger type %q (got %v)", event, typ, got)
+			}
+		}
+	}
+	if !strings.Contains(body, "exclude-extra:") {
+		t.Fatal("caller must keep exclude-extra inputs")
 	}
 	// No generated paths are committed in this repo on top of the
 	// script's built-in lockfile/generated/fixture exclusions, so
