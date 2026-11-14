@@ -1,0 +1,54 @@
+# Highest matching tier wins; sensitive wins overlaps. Unmatched paths are sensitive.
+# QA reviews every change and verifies both the path tier and the diff content.
+# Security reviews sensitive, unclassified or escalated changes before QA.
+# Template tiers map low to T2, ordinary to T1 and sensitive to T0;
+# a higher declared template tier is always acceptable.
+# Low test paths cover additive unit tests only: weakened assertions, deleted
+# tests or snapshots, and lowered gates are always sensitive.
+# Always sensitive, regardless of path: endpoint or input parsing changes;
+# auth, sessions, crypto, keys, secrets, credentials or permissions; tenant
+# isolation or personal data; SQL, schema or migrations; dependencies and
+# lockfiles (including dev dependencies); CI and workflows.
+# Security documentation and agent instructions are not low-risk prose.
+# Moving a sensitive-floor path down requires Security approval on that PR.
+# This map records review policy; it does not install or activate a guard.
+version: 1
+default_tier: sensitive
+tiers:
+  low:
+    - models_catalog_test.go
+    - hopper_quota_test.go
+  ordinary: []
+  sensitive:
+    - .github/**
+    - CODEOWNERS
+    - '**/CODEOWNERS'
+    - AGENTS.md
+    - '**/AGENTS.md'
+    - CLAUDE.md
+    - '**/CLAUDE.md'
+    - .claude/**
+    - '**/skills/**'
+    - go.mod
+    - go.sum
+    - '**/go.mod'
+    - '**/go.sum'
+    - Makefile
+    - '**/Makefile'
+    - Dockerfile
+    - '**/Dockerfile*'
+    - scripts/**
+    - integration/**
+    - auth.go
+    - base*.go
+    - errors.go
+    - executor.go
+    - main.go
+    - models.go
+    - quota*.go
+    - login_test.go
+    - http_executor_test.go
+    - packaging_test.go
+    - pr_size_caller_test.go
+    - registry.json
+    - docs/PROVENANCE.md
