@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
@@ -52,9 +51,13 @@ func (q *quotaProvider) remember(id string, usage quotaUsage, observedAt time.Ti
 	if ok && current.observedAt.After(observedAt) {
 		return
 	}
-	kept := quotaUsage{Plan: usage.Plan, Readings: append([]quotaReading(nil), usage.Readings...)}
-	if kept.Plan == "" && ok {
+	kept := quotaUsage{Plan: usage.Plan, BalanceUSD: usage.BalanceUSD, Readings: append([]quotaReading(nil), usage.Readings...)}
+	if ok && kept.Plan == "" {
 		kept.Plan = current.usage.Plan
+	}
+	// Headers never carry the balance, so a header update keeps the polled one.
+	if ok && kept.BalanceUSD == nil {
+		kept.BalanceUSD = current.usage.BalanceUSD
 	}
 	q.readings[id] = timedReading{usage: kept, observedAt: observedAt, expires: observedAt.Add(providerkit.QuotaCacheTTL)}
 }
@@ -109,11 +112,11 @@ func normalizeUsage(usage quotaUsage) pluginapi.QuotaFetchResponse {
 	out := pluginapi.QuotaFetchResponse{}
 	var buckets []pluginapi.QuotaBucket
 	for _, r := range usage.Readings {
-		window := providerkit.CardWindowWeekly
+		window, label := providerkit.CardWindowWeekly, "Weekly limit"
 		if r.Window == windowFiveHour {
-			window = providerkit.CardWindowFiveHour
+			window, label = providerkit.CardWindowFiveHour, "5-hour limit"
 		}
-		bucket := pluginapi.QuotaBucket{Window: window, RemainingFraction: r.remainingFraction(), Description: fmt.Sprintf("$%.2f of $%.2f used", r.UsedUSD, r.LimitUSD)}
+		bucket := pluginapi.QuotaBucket{Window: window, RemainingFraction: r.remainingFraction(), Description: label}
 		if !r.ResetAt.IsZero() {
 			bucket.ResetTime = r.ResetAt.Format(time.RFC3339Nano)
 		}
@@ -124,6 +127,9 @@ func normalizeUsage(usage quotaUsage) pluginapi.QuotaFetchResponse {
 	}
 	if usage.Plan != "" {
 		out.Subscription = &pluginapi.QuotaSubscription{Plan: usage.Plan}
+	}
+	if usage.BalanceUSD != nil {
+		out.Summary = []pluginapi.QuotaMetric{{Key: "account_balance_usd", Label: "Balance", Value: *usage.BalanceUSD, Format: "currency", Currency: "USD"}}
 	}
 	return out
 }
@@ -139,10 +145,13 @@ func (q *quotaProvider) HandleUsage(_ context.Context, record pluginapi.UsageRec
 	}
 	id := quotaIdentity(record.AuthID, record.AuthIndex)
 	q.remember(id, usage, time.Now())
-	if usage.Plan == "" {
-		q.mu.Lock()
-		usage.Plan = q.readings[id].usage.Plan
-		q.mu.Unlock()
+	q.mu.Lock()
+	if remembered, ok := q.readings[id]; ok {
+		if usage.Plan == "" {
+			usage.Plan = remembered.usage.Plan
+		}
+		usage.BalanceUSD = remembered.usage.BalanceUSD
 	}
+	q.mu.Unlock()
 	_ = q.cache.Store(pluginapi.QuotaFetchRequest{Provider: record.Provider, AuthID: record.AuthID, AuthIndex: record.AuthIndex}, normalizeUsage(usage))
 }
