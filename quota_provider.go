@@ -55,10 +55,6 @@ func (q *quotaProvider) remember(id string, usage quotaUsage, observedAt time.Ti
 	if ok && kept.Plan == "" {
 		kept.Plan = current.usage.Plan
 	}
-	// Headers never carry the balance, so a header update keeps the polled one.
-	if ok && kept.BalanceUSD == nil {
-		kept.BalanceUSD = current.usage.BalanceUSD
-	}
 	q.readings[id] = timedReading{usage: kept, observedAt: observedAt, expires: observedAt.Add(providerkit.QuotaCacheTTL)}
 }
 
@@ -84,8 +80,12 @@ func quotaIdentity(id, index string) string {
 }
 
 func newQuotaProvider(endpoint string, client httpDoer) *quotaProvider {
+	return newQuotaProviderWithTTL(endpoint, client, providerkit.QuotaCacheTTL)
+}
+
+func newQuotaProviderWithTTL(endpoint string, client httpDoer, ttl time.Duration) *quotaProvider {
 	q := &quotaProvider{}
-	q.cache = providerkit.NewCachedQuota(provider, "Hopper", func(ctx context.Context, req pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
+	q.cache = providerkit.NewCachedQuotaWithTTL(provider, "Hopper", func(ctx context.Context, req pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
 		key, err := providerkit.APIKey(req.StorageJSON, req.Metadata)
 		if err != nil {
 			return pluginapi.QuotaFetchResponse{}, err
@@ -102,7 +102,7 @@ func newQuotaProvider(endpoint string, client httpDoer) *quotaProvider {
 		}
 		q.remember(quotaIdentity(req.AuthID, req.AuthIndex), usage, observedAt)
 		return normalizeUsage(usage), nil
-	})
+	}, ttl)
 	return q
 }
 
@@ -144,14 +144,8 @@ func (q *quotaProvider) HandleUsage(_ context.Context, record pluginapi.UsageRec
 		return
 	}
 	id := quotaIdentity(record.AuthID, record.AuthIndex)
-	q.remember(id, usage, time.Now())
-	q.mu.Lock()
-	if remembered, ok := q.readings[id]; ok {
-		if usage.Plan == "" {
-			usage.Plan = remembered.usage.Plan
-		}
-		usage.BalanceUSD = remembered.usage.BalanceUSD
-	}
-	q.mu.Unlock()
-	_ = q.cache.Store(pluginapi.QuotaFetchRequest{Provider: record.Provider, AuthID: record.AuthID, AuthIndex: record.AuthIndex}, normalizeUsage(usage))
+	// Usage records contain no credential generation. Keep them as 429 hints,
+	// but never publish them into the credential-keyed quota display cache:
+	// doing so can expose an old balance after rotation and starve polling.
+	q.remember(id, usage, q.clock())
 }

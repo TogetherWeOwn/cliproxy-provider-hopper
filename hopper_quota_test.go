@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -192,11 +193,74 @@ func TestQuotaPollRendersHopperCard(t *testing.T) {
 	if len(out.Summary) != 1 || out.Summary[0] != (pluginapi.QuotaMetric{Key: "account_balance_usd", Label: "Balance", Value: 5, Format: "currency", Currency: "USD"}) {
 		t.Fatalf("balance chip %+v", out.Summary)
 	}
-	// Response headers carry no balance, so a header refresh keeps the polled one.
+	// Unbound headers do not replace the credential-bound display cache.
 	q.HandleUsage(context.Background(), pluginapi.UsageRecord{Provider: provider, AuthID: "a", ResponseHeaders: hopperHeaders("3", "31")})
 	cached, err := q.cache.FetchQuota(context.Background(), pluginapi.QuotaFetchRequest{AuthID: "a", StorageJSON: []byte(`{"api_key":"example-key"}`)})
-	if err != nil || len(cached.Summary) != 1 || cached.Summary[0].Value != 5 || cached.Groups[0].Buckets[0].RemainingFraction != 0.625 {
-		t.Fatalf("header refresh %+v %v", cached, err)
+	if err != nil || len(cached.Summary) != 1 || cached.Summary[0].Value != 5 || cached.Groups[0].Buckets[0].RemainingFraction != 0.75 {
+		t.Fatalf("credential-bound cache %+v %v", cached, err)
+	}
+}
+
+func TestHeadersCannotStarvePollingOrCrossCredentialGenerations(t *testing.T) {
+	var polls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		polls.Add(1)
+		body := usageBody
+		if r.Header.Get("Authorization") == "Bearer new-key" {
+			body = strings.Replace(body, `"credits_remaining_usd":5`, `"credits_remaining_usd":2`, 1)
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+	q := newQuotaProviderWithTTL(server.URL, server.Client(), time.Nanosecond)
+	req := pluginapi.QuotaFetchRequest{AuthID: "a", StorageJSON: []byte(`{"api_key":"old-key"}`)}
+	for i := 0; i < 3; i++ {
+		q.HandleUsage(context.Background(), pluginapi.UsageRecord{Provider: provider, AuthID: "a", ResponseHeaders: hopperHeaders("3", "31")})
+		out, err := q.cache.FetchQuota(context.Background(), req)
+		if err != nil || len(out.Summary) != 1 || out.Summary[0].Value != 5 {
+			t.Fatalf("poll %d: %+v %v", i, out, err)
+		}
+	}
+	if polls.Load() != 3 {
+		t.Fatalf("headers starved polls: %d", polls.Load())
+	}
+	// The old credential is still cached when the same identity rotates.
+	q = newQuotaProvider(server.URL, server.Client())
+	if _, err := q.cache.FetchQuota(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	q.HandleUsage(context.Background(), pluginapi.UsageRecord{Provider: provider, AuthID: "a", ResponseHeaders: hopperHeaders("3", "31")})
+	req.StorageJSON = []byte(`{"api_key":"new-key"}`)
+	out, err := q.cache.FetchQuota(context.Background(), req)
+	if err != nil || len(out.Summary) != 1 || out.Summary[0].Value != 2 || polls.Load() != 5 {
+		t.Fatalf("rotated credential: %+v %v polls=%d", out, err, polls.Load())
+	}
+}
+
+func TestHeaderDuringPollCannotReplaceBalance(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		<-release
+		_, _ = w.Write([]byte(usageBody))
+	}))
+	defer server.Close()
+	q := newQuotaProvider(server.URL, server.Client())
+	type result struct {
+		out pluginapi.QuotaFetchResponse
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := q.cache.FetchQuota(context.Background(), pluginapi.QuotaFetchRequest{AuthID: "a", StorageJSON: []byte(`{"api_key":"example-key"}`)})
+		done <- result{out, err}
+	}()
+	<-started
+	q.HandleUsage(context.Background(), pluginapi.UsageRecord{Provider: provider, AuthID: "a", ResponseHeaders: hopperHeaders("3", "31")})
+	close(release)
+	got := <-done
+	if got.err != nil || len(got.out.Summary) != 1 || got.out.Summary[0].Value != 5 {
+		t.Fatalf("in-flight poll: %+v %v", got.out, got.err)
 	}
 }
 
