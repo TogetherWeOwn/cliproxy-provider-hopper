@@ -212,19 +212,9 @@ func TestRealHostLoader(t *testing.T) {
 	if err != nil || !strings.Contains(string(resp.Payload), `"content":"hello"`) {
 		t.Fatalf("execute %s %v", resp.Payload, err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		quota, _, err = host.FetchQuota(ctx, quotaReq)
-		if err == nil && len(quota.Groups) == 1 && quota.Groups[0].Buckets[0].RemainingFraction == .9 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("UsagePlugin did not update quota %+v %v", quota, err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if polls.Load() != 1 {
-		t.Fatal("header update triggered a quota poll")
+	quota, _, err = host.FetchQuota(ctx, quotaReq)
+	if err != nil || len(quota.Groups) != 1 || quota.Groups[0].Buckets[0].RemainingFraction != .25 || polls.Load() != 1 {
+		t.Fatalf("credential-bound quota %+v %v polls=%d", quota, err, polls.Load())
 	}
 	req.Payload = []byte(`{"model":"hopper/deepseek-v4.1-flash","stream":true,"fixture_gate":true,"messages":[{"role":"user","content":"hello"}]}`)
 	opts.Stream = true

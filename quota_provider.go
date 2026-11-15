@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
@@ -52,8 +51,8 @@ func (q *quotaProvider) remember(id string, usage quotaUsage, observedAt time.Ti
 	if ok && current.observedAt.After(observedAt) {
 		return
 	}
-	kept := quotaUsage{Plan: usage.Plan, Readings: append([]quotaReading(nil), usage.Readings...)}
-	if kept.Plan == "" && ok {
+	kept := quotaUsage{Plan: usage.Plan, BalanceUSD: usage.BalanceUSD, Readings: append([]quotaReading(nil), usage.Readings...)}
+	if ok && kept.Plan == "" {
 		kept.Plan = current.usage.Plan
 	}
 	q.readings[id] = timedReading{usage: kept, observedAt: observedAt, expires: observedAt.Add(providerkit.QuotaCacheTTL)}
@@ -81,8 +80,12 @@ func quotaIdentity(id, index string) string {
 }
 
 func newQuotaProvider(endpoint string, client httpDoer) *quotaProvider {
+	return newQuotaProviderWithTTL(endpoint, client, providerkit.QuotaCacheTTL)
+}
+
+func newQuotaProviderWithTTL(endpoint string, client httpDoer, ttl time.Duration) *quotaProvider {
 	q := &quotaProvider{}
-	q.cache = providerkit.NewCachedQuota(provider, "Hopper", func(ctx context.Context, req pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
+	q.cache = providerkit.NewCachedQuotaWithTTL(provider, "Hopper", func(ctx context.Context, req pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
 		key, err := providerkit.APIKey(req.StorageJSON, req.Metadata)
 		if err != nil {
 			return pluginapi.QuotaFetchResponse{}, err
@@ -99,7 +102,7 @@ func newQuotaProvider(endpoint string, client httpDoer) *quotaProvider {
 		}
 		q.remember(quotaIdentity(req.AuthID, req.AuthIndex), usage, observedAt)
 		return normalizeUsage(usage), nil
-	})
+	}, ttl)
 	return q
 }
 
@@ -109,11 +112,11 @@ func normalizeUsage(usage quotaUsage) pluginapi.QuotaFetchResponse {
 	out := pluginapi.QuotaFetchResponse{}
 	var buckets []pluginapi.QuotaBucket
 	for _, r := range usage.Readings {
-		window := providerkit.CardWindowWeekly
+		window, label := providerkit.CardWindowWeekly, "Weekly limit"
 		if r.Window == windowFiveHour {
-			window = providerkit.CardWindowFiveHour
+			window, label = providerkit.CardWindowFiveHour, "5-hour limit"
 		}
-		bucket := pluginapi.QuotaBucket{Window: window, RemainingFraction: r.remainingFraction(), Description: fmt.Sprintf("$%.2f of $%.2f used", r.UsedUSD, r.LimitUSD)}
+		bucket := pluginapi.QuotaBucket{Window: window, RemainingFraction: r.remainingFraction(), Description: label}
 		if !r.ResetAt.IsZero() {
 			bucket.ResetTime = r.ResetAt.Format(time.RFC3339Nano)
 		}
@@ -124,6 +127,9 @@ func normalizeUsage(usage quotaUsage) pluginapi.QuotaFetchResponse {
 	}
 	if usage.Plan != "" {
 		out.Subscription = &pluginapi.QuotaSubscription{Plan: usage.Plan}
+	}
+	if usage.BalanceUSD != nil {
+		out.Summary = []pluginapi.QuotaMetric{{Key: "account_balance_usd", Label: "Balance", Value: *usage.BalanceUSD, Format: "currency", Currency: "USD"}}
 	}
 	return out
 }
@@ -138,11 +144,8 @@ func (q *quotaProvider) HandleUsage(_ context.Context, record pluginapi.UsageRec
 		return
 	}
 	id := quotaIdentity(record.AuthID, record.AuthIndex)
-	q.remember(id, usage, time.Now())
-	if usage.Plan == "" {
-		q.mu.Lock()
-		usage.Plan = q.readings[id].usage.Plan
-		q.mu.Unlock()
-	}
-	_ = q.cache.Store(pluginapi.QuotaFetchRequest{Provider: record.Provider, AuthID: record.AuthID, AuthIndex: record.AuthIndex}, normalizeUsage(usage))
+	// Usage records contain no credential generation. Keep them as 429 hints,
+	// but never publish them into the credential-keyed quota display cache:
+	// doing so can expose an old balance after rotation and starve polling.
+	q.remember(id, usage, q.clock())
 }
