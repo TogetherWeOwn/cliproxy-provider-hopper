@@ -43,6 +43,34 @@ jobs:
           go install github.com/zricethezav/gitleaks/v8@v8.24.3
           gitleaks dir --redact --no-banner .
           python3 -I scripts/check-public-files.py .
+      - name: Package tested commit
+        if: github.event_name == 'push'
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          mkdir -p "$TMPDIR/release"
+          scripts/package-release.sh "$TMPDIR/release"
+          cd "$TMPDIR/release"
+          sha256sum --check checksums.txt
+          archive=$(find . -maxdepth 1 -name 'hopper_*_linux_amd64.zip' -print)
+          unzip -p "$archive" hopper.so > hopper.so
+          sha256sum hopper.so > library-sha256.txt
+          rm hopper.so
+          {
+            printf 'commit=%s\n' "$GITHUB_SHA"
+            printf 'repository=%s\n' "$GITHUB_REPOSITORY"
+            printf 'run=%s/%s/actions/runs/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            printf 'run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
+            printf 'go=%s\n' "$(go version)"
+            printf 'registry_version=%s\n' "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["plugins"][0]["version"])' "$GITHUB_WORKSPACE/registry.json")"
+          } > provenance.txt
+      - name: Retain release candidate
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hopper-linux-amd64-${{ github.sha }}
+          path: ${{ env.TMPDIR }}/release/
+          if-no-files-found: error
+          retention-days: 7
       - name: Remove scratch directory
         if: always()
         run: |
